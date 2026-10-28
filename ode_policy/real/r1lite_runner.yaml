@@ -1,0 +1,84 @@
+# Training config for R1 Lite real-robot data (right arm 6 joints + gripper, 15 Hz,
+# head + right-wrist cameras at 256x256 pad-to-square). Same conventions as the
+# default_runner_pick_cup_5_13.yaml, so a2a_dit / fm_dit / mars trained here are
+# comparable with the chunk baselines; the ODE policy adds joint_space on top.
+#
+# Prefer ode_policy/real/train_r1lite.sh, which picks the zarr (ODE layout vs command
+# layout) and injects the per-policy overrides:
+#
+#   bash ode_policy/real/train_r1lite.sh ode  train_config.training_params.num_epochs=100
+#   bash ode_policy/real/train_r1lite.sh fm_dit
+#
+# The trainer is the generic LIBERO train runner (no LIBERO-specific code, no simulator).
+
+defaults:
+  - /dataset_config: robot_image_dataset
+  - /policy_config: ${oc.env:policy_name,ode}
+  - /train_config: default_train
+  - _self_
+
+policy_name: ${oc.env:policy_name,ode}
+task_name: r1lite_insert_flower
+name: ${task_name}
+_target_: ode_policy.libero.libero_train_runner.LiberoTrainRunner
+
+hydra:
+  searchpath:
+    - pkg://ode_policy.configs
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ./il_outputs/${policy_name}/${task_name}
+
+dataset_config:
+  # ODE layout (build_ode_zarr_real.py); train_r1lite.sh switches non-ODE policies to the
+  # command layout zarr (<task>.zarr, gripper in mm)
+  zarr_path: ./data_policy/${task_name}_ode.zarr
+  extra_camera_keys: [wrist_camera]
+
+image_shape: &image_shape [3, 256, 256]
+shape_meta: &shape_meta
+  obs:
+    head_cam:
+      shape: *image_shape
+      type: rgb
+    wrist_cam:
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [7]            # right_arm joints (6, rad) + right_gripper (1, mm)
+      type: low_dim
+  action:
+    shape: [7]              # ODE zarr: [joint target (6), gripper +1 close / -1 open]
+                            # command-layout zarr: [joint target (6), gripper command (mm)]
+
+exp_name: ${task_name}
+horizon: 16           # 8 history + 8 future
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+train_enable: True
+eval_enable: False
+eval_path: null
+
+logging:
+  project: ODE_r1lite
+  resume: False
+  # the compute nodes may not reach wandb; pass logging.mode=online once `wandb login`
+  # works from a job (anything other than "online" means: no wandb at all)
+  mode: disabled
+  name: ${task_name}_${policy_name}
+  tags:
+    - r1lite
+    - ${task_name}
+    - ${policy_name}
+  id: null
+  group: null
+
+checkpoint:
+  save_root_dir: ./il_outputs/${policy_name}/${task_name}

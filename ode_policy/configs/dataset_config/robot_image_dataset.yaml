@@ -7,3 +7,5 @@ seed: 42
 val_ratio: 0.02
 batch_size: 32
 max_train_episodes: null
+# extra data/ camera arrays, exposed as <name>_cam (e.g. [wrist_camera] -> wrist_cam); null = head only
+extra_camera_keys: null

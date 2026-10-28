@@ -1,0 +1,37 @@
+# Real-robot (R1 Lite) training + deployment path of the ODE policy. No simulator.
+# torch / torchvision are installed separately with the CUDA index (see scripts/setup_env.sh).
+#
+# Version picks that matter:
+#   numpy<2            zarr 2.17 predates the numpy-2 ABI; keep the pin the LIBERO env uses.
+#   zarr 2.x           ode_policy/utils/replay_buffer.py uses zarr.DirectoryStore /
+#                      copy_store / MemoryStore, all removed in zarr 3.
+#   diffusers          ode_policy/utils/lr_scheduler.py imports diffusers.optimization.
+#   pandas             imported by utils/json_logger.py.
+#   av + imageio       AV1 (libsvtav1) mp4 decoding for the LeRobot videos.
+#   pyarrow<22         LeRobot parquet; 22+ refuses to import under numpy 1.x.
+#   websockets, msgpack, opencv  deploy server (same wire protocol as the openpi-r1lite client).
+numpy<2
+zarr==2.17.2
+numcodecs==0.12.1
+numba
+dill
+hydra-core>=1.3
+omegaconf
+loguru
+tqdm
+wandb
+pandas
+diffusers>=0.30,<0.40
+scipy
+einops
+torchcfm
+imageio[ffmpeg]
+av
+pyarrow<22
+opencv-python-headless
+matplotlib
+websockets
+msgpack
+pytest
+pytest-timeout
+huggingface_hub

@@ -34,14 +34,20 @@ class RobotImageDataset(BaseImageDataset):
         # (see ode_policy/libero/libero_dataset.py). Default () keeps
         # every existing dataset byte-for-byte unchanged.
         extra_keys=(),
+        # Extra camera arrays under data/ (e.g. "wrist_camera"), loaded like
+        # head_camera and exposed to the policy as `<name without _camera>_cam`
+        # (wrist_camera -> wrist_cam, the shape_meta key). Ported from GAP's
+        # real-robot path; None keeps the single-camera behaviour unchanged.
+        extra_camera_keys=None,
     ):
 
         super().__init__()
 
+        self.extra_camera_keys = list(extra_camera_keys or [])
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path,
             # keys=['head_camera', 'front_camera', 'left_camera', 'right_camera', 'state', 'action'],
-            keys=["head_camera", "state", "action", *extra_keys],
+            keys=["head_camera", "state", "action", *extra_keys, *self.extra_camera_keys],
         )
 
         val_mask = get_val_mask(n_episodes=self.replay_buffer.n_episodes, val_ratio=val_ratio, seed=seed)
@@ -91,6 +97,8 @@ class RobotImageDataset(BaseImageDataset):
         normalizer["front_cam"] = get_image_range_normalizer()
         normalizer["left_cam"] = get_image_range_normalizer()
         normalizer["right_cam"] = get_image_range_normalizer()
+        for k in self.extra_camera_keys:
+            normalizer[k.replace("_camera", "_cam")] = get_image_range_normalizer()
         return normalizer
 
     def __len__(self) -> int:
@@ -136,13 +144,13 @@ class RobotImageDataset(BaseImageDataset):
         agent_pos = samples["state"].to(device, non_blocking=True)
         head_cam = samples["head_camera"].to(device, non_blocking=True) / 255.0
         action = samples["action"].to(device, non_blocking=True)
-        return {
-            "obs": {
-                "head_cam": head_cam,  # B, T, 3, H, W
-                "agent_pos": agent_pos,  # B, T, D
-            },
-            "action": action,  # B, T, D
+        obs = {
+            "head_cam": head_cam,  # B, T, 3, H, W
+            "agent_pos": agent_pos,  # B, T, D
         }
+        for k in self.extra_camera_keys:
+            obs[k.replace("_camera", "_cam")] = samples[k].to(device, non_blocking=True) / 255.0
+        return {"obs": obs, "action": action}  # action: B, T, D
 
 
 def _batch_sample_sequence(

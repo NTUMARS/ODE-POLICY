@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import os
 import random
+import time
 
 import hydra
 import numpy as np
@@ -24,15 +25,22 @@ from ode_policy.utils.pytorch_util import optimizer_to
 
 
 class _BatchSampler:
-    """Yields arrays of sample indices; the datasets fill pinned buffers in one go."""
+    """Yields arrays of sample indices; the datasets fill pinned buffers in one go.
+
+    With world_size > 1 (torchrun / DDP) every rank draws the SAME permutation (same seed) and
+    takes every world_size-th batch of it, so the shards are disjoint and of equal length -- DDP
+    needs the same number of steps on every rank. world_size == 1 is the original behaviour.
+    """
 
     def __init__(self, data_size: int, batch_size: int, shuffle: bool = False,
-                 seed: int = 0, drop_last: bool = True):
+                 seed: int = 0, drop_last: bool = True, rank: int = 0, world_size: int = 1):
         assert drop_last
         self.data_size = data_size
         self.batch_size = batch_size
-        self.num_batch = data_size // batch_size
-        self.discard = data_size - batch_size * self.num_batch
+        self.rank, self.world_size = rank, world_size
+        self.num_batch_total = data_size // batch_size
+        self.num_batch = self.num_batch_total // world_size
+        self.discard = data_size - batch_size * self.num_batch_total
         self.shuffle = shuffle
         self.rng = np.random.default_rng(seed) if shuffle else None
 
@@ -40,18 +48,30 @@ class _BatchSampler:
         perm = self.rng.permutation(self.data_size) if self.shuffle else np.arange(self.data_size)
         if self.discard > 0:
             perm = perm[: -self.discard]
-        perm = perm.reshape(self.num_batch, self.batch_size)
+        perm = perm.reshape(self.num_batch_total, self.batch_size)
         for i in range(self.num_batch):
-            yield perm[i]
+            yield perm[i * self.world_size + self.rank]
 
     def __len__(self):
         return self.num_batch
 
 
+class _LossModule(torch.nn.Module):
+    """DistributedDataParallel hooks the gradient all-reduce on forward(); the policies compute
+    their loss in compute_loss(), so this adapter makes that the forward."""
+
+    def __init__(self, policy):
+        super().__init__()
+        self.policy = policy
+
+    def forward(self, batch):
+        return self.policy.compute_loss(batch)
+
+
 def _create_dataloader(dataset, *, batch_size, shuffle, num_workers, pin_memory,
-                       persistent_workers, seed: int = 0):
+                       persistent_workers, seed: int = 0, rank: int = 0, world_size: int = 1):
     batch_sampler = _BatchSampler(len(dataset), batch_size, shuffle=shuffle,
-                                  seed=seed, drop_last=True)
+                                  seed=seed, drop_last=True, rank=rank, world_size=world_size)
 
     def collate(x):
         assert len(x) == 1
@@ -97,6 +117,33 @@ class LiberoTrainRunner(BaseRunner):
     def train(self):
         cfg = copy.deepcopy(self.cfg)
 
+        # Multi-GPU via torchrun (one process per GPU, DistributedDataParallel over the loss).
+        # Without torchrun WORLD_SIZE is unset and everything below is the single-process path.
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", "0"))
+        distributed = world_size > 1
+        is_main = rank == 0
+        if distributed:
+            import torch.distributed as dist
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            # nccl on GPUs; gloo on CPU-only nodes (DDP_BACKEND overrides) so the DDP path can be
+            # exercised in a CPU job
+            use_cuda = torch.cuda.is_available()
+            dist.init_process_group(os.environ.get("DDP_BACKEND", "nccl" if use_cuda else "gloo"))
+            if use_cuda:
+                torch.cuda.set_device(local_rank)
+                device = torch.device(f"cuda:{local_rank}")
+            else:
+                device = torch.device("cpu")
+            # the model was initialised identically on every rank (seeded in __init__, and DDP
+            # broadcasts rank 0's weights anyway); the training noise should differ per rank
+            torch.manual_seed(cfg.train_config.training_params.seed + rank)
+            log.info(f"DDP rank {rank}/{world_size} on {device}; per-rank batch "
+                     f"{cfg.train_config.dataloader.batch_size}, global batch "
+                     f"{cfg.train_config.dataloader.batch_size * world_size}")
+        else:
+            device = torch.device(cfg.train_config.training_params.device)
+
         if cfg.train_config.training_params.resume:
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path is not None and latest_ckpt_path.is_file():
@@ -108,7 +155,8 @@ class LiberoTrainRunner(BaseRunner):
                     self.global_step = 0
 
         dataset = hydra.utils.instantiate(cfg.dataset_config)
-        train_dataloader = _create_dataloader(dataset, **cfg.train_config.dataloader)
+        train_dataloader = _create_dataloader(dataset, **cfg.train_config.dataloader,
+                                             rank=rank, world_size=world_size)
         normalizer = dataset.get_normalizer()
 
         val_dataset = dataset.get_validation_dataset()
@@ -148,7 +196,7 @@ class LiberoTrainRunner(BaseRunner):
 
         wandb_run = None
         wandb_disabled = os.environ.get("WANDB_MODE", "").lower() == "disabled"
-        if cfg.logging.mode == "online" and not wandb_disabled:
+        if is_main and cfg.logging.mode == "online" and not wandb_disabled:
             logging_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
             if logging_cfg.get("tags"):
                 logging_cfg["tags"] = [t[:64] for t in logging_cfg["tags"]]
@@ -164,11 +212,29 @@ class LiberoTrainRunner(BaseRunner):
                 log.warning(f"wandb init failed: {e}. Continuing without wandb.")
                 wandb_run = None
 
-        device = torch.device(cfg.train_config.training_params.device)
         self.model.to(device)
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
+
+        # Kept as a local, not an attribute: save_checkpoint() serialises every attribute with a
+        # state_dict, and the wrapper would duplicate the whole model under "module.policy.*".
+        train_module = None
+        if distributed:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            # ModuleAttrMixin registers an EMPTY `_dummy_variable` nn.Parameter on the policy and on
+            # the obs encoder (device / dtype probes). They can never receive a gradient, which DDP
+            # reports as "parameters that were not used in producing loss" -- freeze them. Any real
+            # parameter a policy leaves unused needs DDP_FIND_UNUSED=1 instead.
+            frozen = [n for n, p in self.model.named_parameters() if p.numel() == 0 and p.requires_grad]
+            for n, p in self.model.named_parameters():
+                if p.numel() == 0:
+                    p.requires_grad_(False)
+            if frozen:
+                log.info(f"DDP: froze {len(frozen)} empty probe parameter(s): {frozen}")
+            train_module = DDP(_LossModule(self.model),
+                               device_ids=[device.index] if device.type == "cuda" else None,
+                               find_unused_parameters=os.environ.get("DDP_FIND_UNUSED", "0") == "1")
 
         train_sampling_batch = None
 
@@ -182,10 +248,12 @@ class LiberoTrainRunner(BaseRunner):
             cfg.train_config.training_params.sample_every = 1
 
         _csv_step_rows = []
-        log_path = os.path.join(self.output_dir, "logs.json.txt")
+        # only rank 0 writes logs; the other ranks get a scratch file so nothing collides
+        log_path = os.path.join(self.output_dir, "logs.json.txt" if is_main else f"logs.rank{rank}.json.txt")
         with JsonLogger(log_path) as json_logger:
             for _ in range(cfg.train_config.training_params.num_epochs):
                 step_log = dict()
+                epoch_t0 = time.time()
 
                 if cfg.train_config.training_params.freeze_encoder:
                     self.model.obs_encoder.eval()
@@ -197,13 +265,14 @@ class LiberoTrainRunner(BaseRunner):
                     desc=f"Training epoch {self.epoch}",
                     leave=False,
                     mininterval=cfg.train_config.training_params.tqdm_interval_sec,
+                    disable=not is_main,
                 ) as tepoch:
                     for batch_idx, batch in enumerate(tepoch):
                         batch = dataset.postprocess(batch, device)
                         if train_sampling_batch is None:
                             train_sampling_batch = batch
 
-                        raw_loss = self.model.compute_loss(batch)
+                        raw_loss = train_module(batch) if distributed else self.model.compute_loss(batch)
                         loss = raw_loss / cfg.train_config.training_params.gradient_accumulate_every
                         loss.backward()
 
@@ -236,7 +305,8 @@ class LiberoTrainRunner(BaseRunner):
                         if not is_last_batch:
                             if wandb_run is not None:
                                 wandb_run.log(step_log, step=self.global_step)
-                            json_logger.log(step_log)
+                            if is_main:
+                                json_logger.log(step_log)
                             self.global_step += 1
 
                         if (cfg.train_config.training_params.max_train_steps is not None) and \
@@ -244,11 +314,17 @@ class LiberoTrainRunner(BaseRunner):
                             break
 
                 step_log["train_loss"] = float(np.mean(train_losses))
+                step_log["epoch_time_s"] = time.time() - epoch_t0
+                step_log["train_steps_in_epoch"] = len(train_losses)
+                if device.type == "cuda":
+                    step_log["gpu_mem_gb"] = torch.cuda.max_memory_allocated(device) / 2 ** 30
 
                 policy = self.ema_model if cfg.train_config.training_params.use_ema else self.model
                 policy.eval()
 
-                if (self.epoch % cfg.train_config.training_params.val_every) == 0:
+                # validation, the sampling check and checkpoints: rank 0 only (no collectives in
+                # them, so the other ranks simply wait at the next DDP step)
+                if is_main and (self.epoch % cfg.train_config.training_params.val_every) == 0:
                     with torch.no_grad():
                         val_losses = []
                         with tqdm.tqdm(
@@ -266,7 +342,7 @@ class LiberoTrainRunner(BaseRunner):
                         if val_losses:
                             step_log["val_loss"] = torch.mean(torch.tensor(val_losses)).item()
 
-                if (self.epoch % cfg.train_config.training_params.sample_every) == 0:
+                if is_main and (self.epoch % cfg.train_config.training_params.sample_every) == 0:
                     with torch.no_grad():
                         batch = train_sampling_batch
                         obs_dict = batch["obs"]
@@ -301,14 +377,19 @@ class LiberoTrainRunner(BaseRunner):
                 ckpt_epochs = cfg.train_config.training_params.get("checkpoint_epochs")
                 save_now = ((self.epoch + 1) in ckpt_epochs) if ckpt_epochs else \
                     ((self.epoch + 1) % cfg.train_config.training_params.checkpoint_every == 0)
-                if save_now or (self.epoch + 1 >= cfg.train_config.training_params.num_epochs):
+                if is_main and (save_now or (self.epoch + 1 >= cfg.train_config.training_params.num_epochs)):
                     ckpt_path = os.path.join(
                         cfg.checkpoint.save_root_dir, "checkpoints", f"{self.epoch + 1}.ckpt"
                     )
                     self.save_checkpoint(ckpt_path)
 
                 policy.train()
-                json_logger.log(step_log)
+                if is_main:
+                    json_logger.log(step_log)
+                    log.info(f"epoch {self.epoch} done in {step_log['epoch_time_s']:.0f} s: "
+                             f"train_loss {step_log['train_loss']:.4f}"
+                             + (f", val_loss {step_log['val_loss']:.4f}" if "val_loss" in step_log else "")
+                             + (f", gpu_mem {step_log['gpu_mem_gb']:.1f} GB" if "gpu_mem_gb" in step_log else ""))
                 if wandb_run is not None:
                     wandb_run.log(step_log, step=self.global_step)
                 self.global_step += 1
@@ -320,6 +401,10 @@ class LiberoTrainRunner(BaseRunner):
                 if stop_at is not None and self.epoch >= stop_at:
                     log.info(f"stop_at_epoch={stop_at} reached; ending training early")
                     break
+
+            if distributed:
+                dist.barrier()
+                dist.destroy_process_group()
 
             if _csv_step_rows:
                 import csv

@@ -1,0 +1,88 @@
+# Training config for R1 Lite TWO-ARM tasks (e.g. r1lite_microwave). Same as r1lite_runner.yaml
+# (window, encoder, logging, output dirs) except for what the robot reads and writes:
+#   state / action: the robot client's 14-D wire order [L1..L6, L_grip, R1..R6, R_grip]
+#                   (lerobot2zarr.py --preset bimanual)
+#   cameras:        head_cam + wrist_cam (RIGHT wrist) + left_wrist_cam, 256x256 pad-to-square
+# (standalone rather than inheriting r1lite_runner.yaml: Hydra only accepts hydra.searchpath in
+# the primary config)
+#
+# train_r1lite.sh picks this config itself when the zarr is two-arm, and adds the ODE policy's
+# pose_dim=12 n_grippers=2 state_pose_index=[0..5,7..12] from the ODE zarr's attrs:
+#
+#   TASK=r1lite_microwave bash ode_policy/real/train_r1lite.sh ode
+#   TASK=r1lite_microwave bash ode_policy/real/train_r1lite.sh fm_dit
+
+defaults:
+  - /dataset_config: robot_image_dataset
+  - /policy_config: ${oc.env:policy_name,ode}
+  - /train_config: default_train
+  - _self_
+
+policy_name: ${oc.env:policy_name,ode}
+task_name: r1lite_microwave
+name: ${task_name}
+_target_: ode_policy.libero.libero_train_runner.LiberoTrainRunner
+
+hydra:
+  searchpath:
+    - pkg://ode_policy.configs
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ./il_outputs/${policy_name}/${task_name}
+
+dataset_config:
+  # ODE layout (build_ode_zarr_real.py); train_r1lite.sh switches non-ODE policies to the
+  # command layout zarr (<task>.zarr, grippers in mm)
+  zarr_path: ./data_policy/${task_name}_ode.zarr
+  extra_camera_keys: [wrist_camera, left_wrist_camera]
+
+image_shape: &image_shape [3, 256, 256]
+shape_meta: &shape_meta
+  obs:
+    head_cam:
+      shape: *image_shape
+      type: rgb
+    wrist_cam:              # the RIGHT wrist (client cam_right_wrist)
+      shape: *image_shape
+      type: rgb
+    left_wrist_cam:         # client cam_left_wrist
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [14]           # [L1..L6 (rad), L_grip (mm), R1..R6 (rad), R_grip (mm)]
+      type: low_dim
+  action:
+    shape: [14]             # ODE zarr: [L1..L6, R1..R6 joint targets, L_grip, R_grip +1 close / -1 open]
+                            # command-layout zarr: [L1..L6, L_grip, R1..R6, R_grip] commands (rad / mm), the wire order
+
+exp_name: ${task_name}
+horizon: 16           # 8 history + 8 future
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+train_enable: True
+eval_enable: False
+eval_path: null
+
+logging:
+  project: ODE_r1lite
+  resume: False
+  # the compute nodes may not reach wandb; pass logging.mode=online once `wandb login`
+  # works from a job (anything other than "online" means: no wandb at all)
+  mode: disabled
+  name: ${task_name}_${policy_name}
+  tags:
+    - r1lite
+    - ${task_name}
+    - ${policy_name}
+  id: null
+  group: null
+
+checkpoint:
+  save_root_dir: ./il_outputs/${policy_name}/${task_name}
