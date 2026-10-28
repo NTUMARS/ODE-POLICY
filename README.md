@@ -42,7 +42,7 @@ plain ODE.
 |---|---|
 | `main` | ODE policy, the imitation-learning baselines of the paper, LIBERO (+ LIBERO-plus) training / evaluation, the 2D multimodal navigation task |
 | `real-r1lite` | Real-robot code for the Galaxea R1 Lite (two arms, joint space): data conversion, training, deployment |
-| `vla-pi05` | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert |
+| `vla-pi05` | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert: [vla/pi05_ode/](vla/pi05_ode/README.md) |
 
 Methods on `main` (`<policy>` names for the scripts below):
 

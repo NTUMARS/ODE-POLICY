@@ -1,0 +1,1668 @@
+diff --git a/examples/libero/main.py b/examples/libero/main.py
+index dc015a6..2904e5f 100644
+--- a/examples/libero/main.py
++++ b/examples/libero/main.py
+@@ -1,8 +1,11 @@
+ import collections
+ import dataclasses
++import json
+ import logging
+ import math
+ import pathlib
++import time
++from typing import Optional, List
+ 
+ import imageio
+ from libero.libero import benchmark
+@@ -27,6 +30,10 @@ class Args:
+     port: int = 8000
+     resize_size: int = 224
+     replan_steps: int = 5
++    # ODE policy: the server returns 8 pose references per call; the client converts each to an
++    # OSC command (gain 1) and carries the last executed reference into the next chunk.
++    use_ode: bool = False
++    task_ids: Optional[List[int]] = None  # noqa: UP006, UP045 - the LIBERO environment is Python 3.8
+ 
+     #################################################################################################################
+     # LIBERO environment-specific parameters
+@@ -41,11 +48,17 @@ class Args:
+     # Utils
+     #################################################################################################################
+     video_out_path: str = "data/libero/videos"  # Path to save videos
++    save_videos: bool = False
++    result_out_path: Optional[str] = None  # noqa: UP045 - upstream LIBERO environment is Python 3.8
+ 
+     seed: int = 7  # Random Seed (for reproducibility)
+ 
+ 
+ def eval_libero(args: Args) -> None:
++    if args.use_ode and args.replan_steps != 8:
++        raise ValueError("The ODE policy executes chunks of 8 steps: pass --args.replan-steps 8")
++    if args.use_ode:
++        from openpi.shared.ode_client import ODEReferenceState
+     # Set random seed
+     np.random.seed(args.seed)
+ 
+@@ -55,7 +68,8 @@ def eval_libero(args: Args) -> None:
+     num_tasks_in_suite = task_suite.n_tasks
+     logging.info(f"Task suite: {args.task_suite_name}")
+ 
+-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
++    if args.save_videos:
++        pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+ 
+     if args.task_suite_name == "libero_spatial":
+         max_steps = 220  # longest training demo has 193 steps
+@@ -74,7 +88,13 @@ def eval_libero(args: Args) -> None:
+ 
+     # Start evaluation
+     total_episodes, total_successes = 0, 0
+-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
++    task_summaries = []
++    episode_records = []
++    inference_warm = False
++    task_ids = list(range(num_tasks_in_suite)) if args.task_ids is None else args.task_ids
++    if len(set(task_ids)) != len(task_ids) or any(i < 0 or i >= num_tasks_in_suite for i in task_ids):
++        raise ValueError('Invalid or duplicated task IDs')
++    for task_id in tqdm.tqdm(task_ids):
+         # Get task
+         task = task_suite.get_task(task_id)
+ 
+@@ -92,6 +112,10 @@ def eval_libero(args: Args) -> None:
+             # Reset environment
+             env.reset()
+             action_plan = collections.deque()
++            ode_state = ODEReferenceState() if args.use_ode else None
++            execution_log = []
++            inference_log = []
++            episode_error = None
+ 
+             # Set initial states
+             obs = env.set_init_state(initial_states[episode_idx])
+@@ -99,6 +123,7 @@ def eval_libero(args: Args) -> None:
+             # Setup
+             t = 0
+             replay_images = []
++            done = False
+ 
+             logging.info(f"Starting episode {task_episodes+1}...")
+             while t < max_steps + args.num_steps_wait:
+@@ -124,6 +149,9 @@ def eval_libero(args: Args) -> None:
+                     # Save preprocessed image for replay video
+                     replay_images.append(img)
+ 
++                    robot_state = np.concatenate((obs['robot0_eef_pos'],
++                        _quat2axisangle(obs['robot0_eef_quat'].copy()),obs['robot0_gripper_qpos']))
++                    ode_fields = ode_state.observe(robot_state) if args.use_ode else {}
+                     if not action_plan:
+                         # Finished executing previous action chunk -- compute new chunk
+                         # Prepare observations dict
+@@ -139,18 +167,34 @@ def eval_libero(args: Args) -> None:
+                             ),
+                             "prompt": str(task_description),
+                         }
++                        element.update(ode_fields)
+ 
+                         # Query model to get action
+-                        action_chunk = client.infer(element)["actions"]
++                        infer_start = time.perf_counter()
++                        response = client.infer(element)
++                        action_chunk = response["actions"]
++                        inference_log.append({'control_step':t-args.num_steps_wait,
++                                              'seconds':time.perf_counter()-infer_start,
++                                              'model_seconds':response['policy_timing']['infer_ms']/1000 if inference_warm else None})
++                        inference_warm = True
++                        if args.use_ode and (np.asarray(action_chunk).shape != (8,7) or not np.isfinite(action_chunk).all()):
++                            raise ValueError('ODE service must return exactly8 finite pose/gripper targets')
+                         assert (
+                             len(action_chunk) >= args.replan_steps
+                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+                         action_plan.extend(action_chunk[: args.replan_steps])
+ 
+                     action = action_plan.popleft()
++                    target = np.asarray(action).copy()
++                    if args.use_ode:
++                        action = ode_state.command(target,robot_state)
+ 
+                     # Execute action in environment
+                     obs, reward, done, info = env.step(action.tolist())
++                    if args.use_ode:
++                        ode_state.commit_executed(target)
++                        execution_log.append({'command':action.tolist(),'position':np.asarray(obs['robot0_eef_pos']).tolist(),
++                                              'reference':target.tolist()})
+                     if done:
+                         task_successes += 1
+                         total_successes += 1
+@@ -159,19 +203,28 @@ def eval_libero(args: Args) -> None:
+ 
+                 except Exception as e:
+                     logging.error(f"Caught exception: {e}")
++                    episode_error = repr(e)
+                     break
+ 
+             task_episodes += 1
+             total_episodes += 1
++            episode_records.append({'task_id':task_id,'init_id':episode_idx,'success':bool(done and episode_error is None),
++                                    'error':episode_error,'execution':execution_log,'inference':inference_log})
++            if args.result_out_path:
++                progress = pathlib.Path(args.result_out_path).with_suffix('.episodes.jsonl')
++                progress.parent.mkdir(parents=True,exist_ok=True)
++                with progress.open('a') as stream:
++                    stream.write(json.dumps(episode_records[-1])+'\n')
+ 
+             # Save a replay video of the episode
+             suffix = "success" if done else "failure"
+             task_segment = task_description.replace(" ", "_")
+-            imageio.mimwrite(
+-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+-                [np.asarray(x) for x in replay_images],
+-                fps=10,
+-            )
++            if args.save_videos:
++                imageio.mimwrite(
++                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
++                    [np.asarray(x) for x in replay_images],
++                    fps=10,
++                )
+ 
+             # Log current results
+             logging.info(f"Success: {done}")
+@@ -181,9 +234,32 @@ def eval_libero(args: Args) -> None:
+         # Log final results
+         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
+         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
++        task_summaries.append(
++            {"task_id": task_id, "task": str(task_description), "successes": task_successes, "episodes": task_episodes}
++        )
++        env.close()
+ 
+     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+     logging.info(f"Total episodes: {total_episodes}")
++    if args.result_out_path is not None:
++        result_path = pathlib.Path(args.result_out_path)
++        result_path.parent.mkdir(parents=True, exist_ok=True)
++        result_path.write_text(
++            json.dumps(
++                {
++                    "task_suite": args.task_suite_name,
++                    "seed": args.seed,
++                    "num_trials_per_task": args.num_trials_per_task,
++                    "successes": total_successes,
++                    "episodes": total_episodes,
++                    "tasks": task_summaries,
++                    "episode_records": episode_records,
++                    "use_ode": args.use_ode,
++                    "replan_steps": args.replan_steps,
++                },
++                indent=2,
++            )
++        )
+ 
+ 
+ def _get_libero_env(task, resolution, seed):
+diff --git a/scripts/train.py b/scripts/train.py
+index 5d28941..7c03ba4 100644
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -1,6 +1,7 @@
+ import dataclasses
+ import functools
+ import logging
++import os
+ import platform
+ from typing import Any
+ 
+@@ -188,6 +189,11 @@ def train_step(
+         "grad_norm": optax.global_norm(grads),
+         "param_norm": optax.global_norm(kernel_params),
+     }
++    if "field" in grads:
++        # ODE head: gradient norm of each part, to check that the condition network learns
++        for name in ("PaliGemma", "query", "z_ada", "field", "grip_head"):
++            if name in grads:
++                info[f"grad_{name}"] = optax.global_norm(grads[name])
+     return new_state, info
+ 
+ 
+@@ -200,7 +206,10 @@ def main(config: _config.TrainConfig):
+             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
+         )
+ 
+-    jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
++    jax.config.update(
++        "jax_compilation_cache_dir",
++        os.environ.get("JAX_COMPILATION_CACHE_DIR", str(epath.Path("~/.cache/jax").expanduser())),
++    )
+ 
+     rng = jax.random.key(config.seed)
+     train_rng, init_rng = jax.random.split(rng)
+@@ -209,6 +218,33 @@ def main(config: _config.TrainConfig):
+     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
+     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+ 
++    data_loader = _data_loader.create_data_loader(
++        config,
++        sharding=data_sharding,
++        shuffle=True,
++    )
++    if config.num_train_epochs is not None:
++        steps_per_epoch = len(data_loader)
++        if steps_per_epoch < 1:
++            raise ValueError("The training data loader has no complete batches")
++        config = dataclasses.replace(
++            config,
++            num_train_steps=steps_per_epoch * config.num_train_epochs,
++            save_interval=steps_per_epoch,
++            keep_period=steps_per_epoch,
++        )
++        logging.info(
++            "Epoch schedule: %d batches/epoch, %d total optimizer steps", steps_per_epoch, config.num_train_steps
++        )
++
++    stop_step = config.num_train_steps
++    if config.stop_after_epoch is not None:
++        if config.num_train_epochs is None or not config.save_checkpoints:
++            raise ValueError("stop_after_epoch requires num_train_epochs and checkpoint writes")
++        if not 1 <= config.stop_after_epoch <= config.num_train_epochs:
++            raise ValueError("stop_after_epoch must be within num_train_epochs")
++        stop_step = config.stop_after_epoch * config.save_interval
++
+     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
+         config.checkpoint_dir,
+         keep_period=config.keep_period,
+@@ -217,11 +253,6 @@ def main(config: _config.TrainConfig):
+     )
+     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+ 
+-    data_loader = _data_loader.create_data_loader(
+-        config,
+-        sharding=data_sharding,
+-        shuffle=True,
+-    )
+     data_iter = iter(data_loader)
+     batch = next(data_iter)
+     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
+@@ -248,8 +279,14 @@ def main(config: _config.TrainConfig):
+     )
+ 
+     start_step = int(train_state.step)
++    if resuming:
++        # Checkpoints hold the model and optimizer, not the shuffled loader position: replay the
++        # seeded stream to where it was (`batch` already holds item zero).
++        logging.info("Replaying %d consumed batches to restore the data cursor", start_step)
++        for _ in range(start_step):
++            batch = next(data_iter)
+     pbar = tqdm.tqdm(
+-        range(start_step, config.num_train_steps),
++        range(start_step, stop_step),
+         initial=start_step,
+         total=config.num_train_steps,
+         dynamic_ncols=True,
+@@ -269,8 +306,12 @@ def main(config: _config.TrainConfig):
+             infos = []
+         batch = next(data_iter)
+ 
+-        if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
++        # checkpoints are named by the number of completed updates (one epoch = steps_per_epoch)
++        completed_steps = step + 1
++        if config.save_checkpoints and (
++            completed_steps % config.save_interval == 0 or completed_steps == config.num_train_steps
++        ):
++            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, completed_steps)
+ 
+     logging.info("Waiting for checkpoint manager to finish")
+     checkpoint_manager.wait_until_finished()
+diff --git a/src/openpi/models/model.py b/src/openpi/models/model.py
+index 29618b4..4a9cb3c 100644
+--- a/src/openpi/models/model.py
++++ b/src/openpi/models/model.py
+@@ -106,6 +106,12 @@ class Observation(Generic[ArrayT]):
+     # Token loss mask (for FAST autoregressive model).
+     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+ 
++    # ODE head: which future steps are inside the episode, the reference to integrate from,
++    # and the pose normalisation slope (to express the start perturbation in physical units).
++    action_valid_mask: at.Bool[ArrayT, "*b ah"] | None = None
++    ode_start: at.Float[ArrayT, "*b p"] | None = None
++    ode_pose_scale: at.Float[ArrayT, "*b p"] | None = None
++
+     @classmethod
+     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
+         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
+@@ -126,6 +132,9 @@ class Observation(Generic[ArrayT]):
+             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
+             token_ar_mask=data.get("token_ar_mask"),
+             token_loss_mask=data.get("token_loss_mask"),
++            action_valid_mask=data.get("action_valid_mask"),
++            ode_start=data.get("ode_start"),
++            ode_pose_scale=data.get("ode_pose_scale"),
+         )
+ 
+     def to_dict(self) -> at.PyTree[ArrayT]:
+@@ -205,6 +214,9 @@ def preprocess_observation(
+         tokenized_prompt_mask=observation.tokenized_prompt_mask,
+         token_ar_mask=observation.token_ar_mask,
+         token_loss_mask=observation.token_loss_mask,
++        action_valid_mask=observation.action_valid_mask,
++        ode_start=observation.ode_start,
++        ode_pose_scale=observation.ode_pose_scale,
+     )
+ 
+ 
+diff --git a/src/openpi/models/ode_field.py b/src/openpi/models/ode_field.py
+new file mode 100644
+index 0000000..2baa77d
+--- /dev/null
++++ b/src/openpi/models/ode_field.py
+@@ -0,0 +1,99 @@
++"""JAX port of the ODE policy's vector field (ode_policy/policies/ode/ode_image_policy.py),
++without the optional diversity head.
++
++Inputs/outputs are normalized poses. Time unit is one controller step, not
++flow time or wall-clock seconds. Condition and proprioception stay fixed.
++"""
++from flax import nnx
++import dataclasses
++import jax
++import jax.numpy as jnp
++
++
++@dataclasses.dataclass(frozen=True)
++class AuthorUniform:
++    bound: float
++
++    def __call__(self, key, shape, dtype=jnp.float32):
++        return jax.random.uniform(key, shape, dtype, minval=-self.bound, maxval=self.bound)
++
++
++def author_linear(in_features, out_features, *, rngs, zero=False):
++    """PyTorch Linear default distribution, or author's zero output projection."""
++    # NNX stores the initializer as static graph metadata. A closure created on
++    # every init would make eval_shape and actual init graph definitions unequal.
++    init = jax.nn.initializers.zeros if zero else AuthorUniform(in_features ** -0.5)
++    return nnx.Linear(in_features, out_features, kernel_init=init, bias_init=init, rngs=rngs)
++
++
++class GripperHead(nnx.Module):
++    """Author's Linear(C,C) -> SiLU -> Linear(C,H), not a linear classifier."""
++    def __init__(self, cond_dim, horizon, *, rngs):
++        self.hidden = author_linear(cond_dim, cond_dim, rngs=rngs)
++        self.output = author_linear(cond_dim, horizon, rngs=rngs)
++
++    def __call__(self, c):
++        return self.output(jax.nn.silu(self.hidden(c)))
++
++
++class FiLMLayer(nnx.Module):
++    def __init__(self, width, cond_dim, *, rngs):
++        self.lin = author_linear(width, width, rngs=rngs)
++        self.film = author_linear(cond_dim, 2 * width, rngs=rngs)
++
++    def __call__(self, h, gb):
++        gain, bias = gb
++        return h + jax.nn.silu(self.lin(h) * (1 + gain) + bias)
++
++
++class VectorField(nnx.Module):
++    def __init__(self, cond_dim, state_dim, width, *, rngs, num_layers=4):
++        self.inp = author_linear(6 + state_dim, width, rngs=rngs)
++        # String-keyed modules keep compatibility with OpenPI's slash-key loader.
++        self.layers = nnx.Dict({f'layer_{i}': FiLMLayer(width, cond_dim, rngs=rngs) for i in range(num_layers)})
++        self.out = author_linear(width, 6, zero=True, rngs=rngs)
++
++    def precompute(self, c):
++        return [jnp.split(layer.film(c), 2, axis=-1) for layer in self.layers.values()]
++
++    def __call__(self, a, s, film):
++        h = self.inp(jnp.concatenate([a, s], axis=-1))
++        for layer, gb in zip(self.layers.values(), film, strict=True):
++            h = layer(h, gb)
++        return self.out(h)
++
++
++def integrate(field, a0, s, c, *, horizon=8, vel_scale=0.05):
++    """Fixed-condition RK4, exactly four field calls per control step."""
++    film = field.precompute(c)
++
++    def step(a, _):
++        f = lambda x: vel_scale * field(x, s, film)
++        k1 = f(a)
++        k2 = f(a + 0.5 * k1)
++        k3 = f(a + 0.5 * k2)
++        k4 = f(a + k3)
++        a = a + (k1 + 2 * k2 + 2 * k3 + k4) / 6
++        return a, a
++
++    _, path = jax.lax.scan(step, a0, None, length=horizon)
++    return jnp.swapaxes(path, 0, 1)
++
++
++def perturb_targets(key, a0, target, pose_scale):
++    """Author's physical 1cm/0.03rad perturbation converted to norm units."""
++    gate_key, noise_key = jax.random.split(key)
++    on = jax.random.bernoulli(gate_key, 0.5, (a0.shape[0], 1))
++    std = jnp.array([0.01] * 3 + [0.03] * 3) * pose_scale
++    delta = jax.random.normal(noise_key, a0.shape) * std * on
++    decay = 0.7 ** jnp.arange(1, target.shape[1] + 1)
++    return a0 + delta, target + delta[:, None] * decay[None, :, None]
++
++
++def path_loss(path, target, grip_logits, grip_target, valid, *, vel_scale=0.05):
++    """Per-example loss; padding contributes neither pose nor gripper loss."""
++    pose = jnp.mean(jnp.square((path - target) / vel_scale), axis=-1)
++    labels = (grip_target > 0).astype(grip_logits.dtype)
++    bce = jax.nn.softplus(grip_logits) - labels * grip_logits
++    loss = jnp.where(valid, pose + 0.1 * bce, 0)
++    return jnp.sum(loss, axis=-1) / jnp.maximum(jnp.sum(valid, axis=-1), 1)
+diff --git a/src/openpi/models/ode_field_test.py b/src/openpi/models/ode_field_test.py
+new file mode 100644
+index 0000000..907a78b
+--- /dev/null
++++ b/src/openpi/models/ode_field_test.py
+@@ -0,0 +1,87 @@
++"""Compare the PyTorch ODE policy's classes (this repository) against the JAX port on CPU."""
++import ast
++import os
++from pathlib import Path
++
++from flax import nnx
++import jax
++import jax.numpy as jnp
++import numpy as np
++import torch
++
++from openpi.models.ode_field import VectorField, integrate, path_loss, perturb_targets
++
++
++def _author_policy_file():
++    """ode_policy/policies/ode/ode_image_policy.py of this repository (the PyTorch reference)."""
++    root = Path(os.environ.get("ODE_POLICY_ROOT", Path(__file__).resolve().parents[6]))
++    return root / "ode_policy/policies/ode/ode_image_policy.py"
++
++
++def author_classes():
++    source = _author_policy_file()
++    tree = ast.parse(source.read_text())
++    # Compile unmodified class definitions, avoiding unrelated vision/env imports.
++    nodes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name in ("_FiLMLayer", "VectorField")]
++    scope = {"torch": torch, "nn": torch.nn, "F": torch.nn.functional, "POSE_DIM": 6}
++    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), scope)
++    return scope["VectorField"]
++
++
++def test_author_field_rk4_and_input_gradient():
++    torch.manual_seed(42)
++    author = author_classes()(5, 8, 12, 4)
++    # Nonzero output necessary to test every layer, not a trivially constant path.
++    torch.nn.init.normal_(author.out.weight, std=0.02)
++    port = VectorField(5, 8, 12, rngs=nnx.Rngs(42))
++    pairs = [(author.inp, port.inp), (author.out, port.out)]
++    for a, b in zip(author.layers, port.layers.values(), strict=True):
++        pairs.extend([(a.lin, b.lin), (a.film, b.film)])
++    for a, b in pairs:
++        b.kernel.value = jnp.asarray(a.weight.detach().numpy().T)
++        b.bias.value = jnp.asarray(a.bias.detach().numpy())
++    rng = np.random.default_rng(42)
++    a, s, c = [rng.normal(size=(2, d)).astype(np.float32) for d in (6, 8, 5)]
++    ta, ts, tc = [torch.tensor(x, requires_grad=True) for x in (a, s, c)]
++    film = author.precompute(tc)
++    x, states = ta, []
++    for _ in range(8):
++        f = lambda z: 0.05 * author(z, ts, tc, film)
++        k1 = f(x)
++        k2 = f(x + 0.5 * k1)
++        k3 = f(x + 0.5 * k2)
++        k4 = f(x + k3)
++        x = x + (k1 + 2*k2 + 2*k3 + k4)/6
++        states.append(x)
++    expected = torch.stack(states, dim=1)
++    actual = integrate(port, jnp.array(a), jnp.array(s), jnp.array(c))
++    np.testing.assert_allclose(actual, expected.detach(), atol=2e-6, rtol=2e-5)
++    expected.square().mean().backward()
++    grads = jax.grad(lambda a, s, c: jnp.mean(integrate(port, a, s, c)**2), argnums=(0, 1, 2))(a, s, c)
++    for got, ref in zip(grads, (ta.grad, ts.grad, tc.grad), strict=True):
++        np.testing.assert_allclose(got, ref, atol=2e-6, rtol=2e-5)
++    parameter_grads=nnx.grad(lambda field:jnp.mean(integrate(field,a,s,c)**2))(port).to_pure_dict()
++    for name,parameter in author.named_parameters():
++        keys=name.split('.')
++        if keys[0]=='layers':
++            keys[1]='layer_'+keys[1]
++        transpose=keys[-1]=='weight'
++        keys[-1]='kernel' if transpose else 'bias'
++        got=parameter_grads
++        for key in keys:
++            got=got[key]
++        ref=parameter.grad.detach().numpy()
++        np.testing.assert_allclose(got,ref.T if transpose else ref,atol=2e-6,rtol=3e-5)
++
++
++def test_zero_initialization_mask_and_perturbation():
++    field = VectorField(5, 8, 12, rngs=nnx.Rngs(0))
++    a = jnp.ones((2, 6))
++    path = integrate(field, a, jnp.ones((2, 8)), jnp.ones((2, 5)))
++    np.testing.assert_array_equal(path, np.ones((2, 8, 6)))
++    target = path.at[:, 1:].set(100)
++    valid = jnp.zeros((2, 8), dtype=bool).at[:, 0].set(True)
++    loss = path_loss(path, target, jnp.zeros((2, 8)), jnp.ones((2, 8)), valid)
++    np.testing.assert_allclose(loss, 0.1*np.log(2), atol=1e-7)
++    a0, tgt = perturb_targets(jax.random.key(42), a, path, jnp.ones(6))
++    np.testing.assert_allclose(tgt-path, (a0-a)[:, None]*0.7**jnp.arange(1, 9)[None, :, None], atol=1e-7)
+diff --git a/src/openpi/models/ode_gripper_test.py b/src/openpi/models/ode_gripper_test.py
+new file mode 100644
+index 0000000..a150fa8
+--- /dev/null
++++ b/src/openpi/models/ode_gripper_test.py
+@@ -0,0 +1,76 @@
++import ast
++import os
++from pathlib import Path
++from types import SimpleNamespace
++
++from flax import nnx
++import jax
++import jax.numpy as jnp
++import numpy as np
++import torch
++
++from openpi.models.ode_field import GripperHead, VectorField, path_loss
++
++
++def _author_policy_file():
++    """ode_policy/policies/ode/ode_image_policy.py of this repository (the PyTorch reference)."""
++    root = Path(os.environ.get("ODE_POLICY_ROOT", Path(__file__).resolve().parents[6]))
++    return root / "ode_policy/policies/ode/ode_image_policy.py"
++
++
++def test_actual_author_gripper_forward_and_gradient():
++    source = _author_policy_file()
++    tree=ast.parse(source.read_text())
++    assignment=next(n for n in ast.walk(tree) if isinstance(n,ast.Assign)
++        and any(isinstance(t,ast.Attribute) and t.attr=='grip_head' for t in n.targets))
++    holder=SimpleNamespace(n_grippers=1)
++    scope={'self':holder,'nn':torch.nn,'cond_dim':12,'n_action_steps':8}
++    exec(compile(ast.Module(body=[assignment],type_ignores=[]),str(source),'exec'),scope)
++    author=holder.grip_head
++    port=GripperHead(12,8,rngs=nnx.Rngs(42))
++    for src,dst in ((author[0],port.hidden),(author[2],port.output)):
++        dst.kernel.value=jnp.asarray(src.weight.detach().numpy().T)
++        dst.bias.value=jnp.asarray(src.bias.detach().numpy())
++    c=np.random.default_rng(42).normal(size=(5,12)).astype(np.float32)
++    tc=torch.tensor(c,requires_grad=True)
++    logits=author(tc)
++    np.testing.assert_allclose(port(c),logits.detach(),atol=1e-6)
++    logits.square().mean().backward()
++    grad=jax.grad(lambda x:jnp.mean(port(x)**2))(c)
++    np.testing.assert_allclose(grad,tc.grad,atol=1e-6)
++    parameter_grads=nnx.grad(lambda head:jnp.mean(head(c)**2))(port).to_pure_dict()
++    for name,src in (('hidden',author[0]),('output',author[2])):
++        np.testing.assert_allclose(parameter_grads[name]['kernel'],src.weight.grad.numpy().T,atol=1e-6)
++        np.testing.assert_allclose(parameter_grads[name]['bias'],src.bias.grad.numpy(),atol=1e-6)
++
++
++def test_author_initialization_bounds_and_zero_field_output():
++    field=VectorField(12,8,64,rngs=nnx.Rngs(42))
++    for layer,fan in ((field.inp,14),(field.layers['layer_0'].lin,64),(field.layers['layer_0'].film,12)):
++        assert np.max(np.abs(layer.kernel.value))<=fan**-.5
++        assert np.max(np.abs(layer.bias.value))<=fan**-.5
++        assert np.any(layer.bias.value!=0)
++    assert np.all(field.out.kernel.value==0) and np.all(field.out.bias.value==0)
++
++
++def test_full_valid_loss_matches_author_mse_plus_bce():
++    rng=np.random.default_rng(42)
++    path,target=[rng.normal(size=(3,8,6)).astype(np.float32) for _ in range(2)]
++    logits=rng.normal(size=(3,8)).astype(np.float32)
++    grip=rng.choice([-1.,1.],size=(3,8)).astype(np.float32)
++    ref=(torch.nn.functional.mse_loss(torch.tensor(path),torch.tensor(target))/.05**2
++         +.1*torch.nn.functional.binary_cross_entropy_with_logits(torch.tensor(logits),torch.tensor((grip>0).astype(np.float32))))
++    got=path_loss(path,target,logits,grip,np.ones((3,8),bool)).mean()
++    np.testing.assert_allclose(got,ref,rtol=1e-6)
++
++
++def test_initializer_has_stable_static_graph_metadata():
++    a=VectorField(12,8,64,rngs=nnx.Rngs(42))
++    b=VectorField(12,8,64,rngs=nnx.Rngs(42))
++    assert nnx.graphdef(a)==nnx.graphdef(b)
++    # Control: otherwise identical locally-created initializer closures differ.
++    def old():
++        def initializer(key,shape,dtype=jnp.float32):
++            return jax.random.uniform(key,shape,dtype,minval=-.5,maxval=.5)
++        return nnx.Linear(4,4,kernel_init=initializer,rngs=nnx.Rngs(42))
++    assert nnx.graphdef(old())!=nnx.graphdef(old())
+diff --git a/src/openpi/models/ode_state_keys_test.py b/src/openpi/models/ode_state_keys_test.py
+new file mode 100644
+index 0000000..a26d1d6
+--- /dev/null
++++ b/src/openpi/models/ode_state_keys_test.py
+@@ -0,0 +1,16 @@
++from flax import nnx
++import pytest
++from openpi.models.ode_field import VectorField
++
++
++def test_numeric_string_keys_reproduce_nnx_load_error():
++    bad=nnx.Dict({'0':nnx.Linear(2,2,rngs=nnx.Rngs(0))})
++    state=nnx.state(bad)
++    with pytest.raises(ValueError,match='not available in state'):
++        state.replace_by_pure_dict(state.to_pure_dict())
++
++
++def test_ode_field_pure_dict_load_roundtrip():
++    field=VectorField(5,8,12,rngs=nnx.Rngs(42))
++    state=nnx.state(field)
++    state.replace_by_pure_dict(state.to_pure_dict())
+diff --git a/src/openpi/models/pi05_ode.py b/src/openpi/models/pi05_ode.py
+new file mode 100644
+index 0000000..5d7202a
+--- /dev/null
++++ b/src/openpi/models/pi05_ode.py
+@@ -0,0 +1,103 @@
++"""Pi0.5 with an ODE action head: an autonomous velocity field integrated with RK4 (no flow time).
++
++Pi05ODE keeps the action expert as a condition network (one learned query token);
++Pi05ODEVLMQuery (pi05_ode_vlmquery.py) drops the expert and reads the condition from the VLM.
++"""
++import dataclasses
++
++from flax import nnx
++from flax.nnx import bridge
++import jax
++import jax.numpy as jnp
++
++from openpi.models import gemma, model, ode_field, pi0, pi0_config, siglip
++from openpi.shared import array_typing as at
++
++
++@dataclasses.dataclass(frozen=True)
++class Pi05ODEConfig(pi0_config.Pi0Config):
++    pi05: bool = True
++    discrete_state_input: bool = False
++    action_horizon: int = 8
++    field_width: int = 512
++
++    def __post_init__(self):
++        super().__post_init__()
++        if not self.pi05 or self.discrete_state_input:
++            raise ValueError("The ODE head requires pi05 and no state tokens")
++        if self.action_horizon != 8:
++            raise ValueError("The ODE head integrates chunks of 8 control steps")
++
++    def create(self, rng):
++        return Pi05ODE(self, nnx.Rngs(rng))
++
++    def inputs_spec(self, *, batch_size=1):
++        obs, actions = super().inputs_spec(batch_size=batch_size)
++        with at.disable_typechecking():
++            return dataclasses.replace(
++                obs,
++                ode_start=jax.ShapeDtypeStruct((batch_size, 6), jnp.float32),
++                ode_pose_scale=jax.ShapeDtypeStruct((batch_size, 6), jnp.float32),
++                action_valid_mask=jax.ShapeDtypeStruct((batch_size, self.action_horizon), jnp.bool_),
++            ), actions
++
++
++class Pi05ODE(model.BaseModel):
++    # Same image/language embedding path and checkpoint names as Pi0.
++    embed_prefix = pi0.Pi0.embed_prefix
++
++    def __init__(self, config, rngs):
++        super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
++        vlm = gemma.get_config(config.paligemma_variant)
++        expert = gemma.get_config(config.action_expert_variant)
++        llm = bridge.ToNNX(gemma.Module(configs=[vlm, expert], embed_dtype=config.dtype, adarms=True))
++        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True])
++        img = bridge.ToNNX(siglip.Module(
++            num_classes=vlm.width, variant="So400m/14", pool_type="none", scan=True, dtype_mm=config.dtype,
++        ))
++        img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
++        self.PaliGemma = nnx.Dict(llm=llm, img=img)
++        self.query = nnx.Param(jax.random.normal(rngs.params(), (1, 1, expert.width)) * 0.02)
++        # Initialized from official time MLP by strict one-time weight migration.
++        self.z_ada = nnx.Param(jnp.zeros((expert.width,), jnp.float32))
++        self.field = ode_field.VectorField(expert.width, 8, config.field_width, rngs=rngs)
++        self.grip_head = ode_field.GripperHead(expert.width, 8, rngs=rngs)
++        self.deterministic = True
++
++    def condition(self, observation):
++        prefix, prefix_mask, prefix_ar = self.embed_prefix(observation)
++        batch = prefix.shape[0]
++        query = jnp.broadcast_to(self.query.value, (batch, 1, self.query.shape[-1]))
++        mask = jnp.concatenate([prefix_mask, jnp.ones((batch, 1), bool)], axis=1)
++        ar = jnp.concatenate([prefix_ar, jnp.ones((1,), bool)])
++        (_, suffix), _ = self.PaliGemma.llm(
++            [prefix, query], mask=pi0.make_attn_mask(mask, ar),
++            positions=jnp.cumsum(mask, axis=1)-1,
++            adarms_cond=[None, jnp.broadcast_to(self.z_ada.value, (batch, self.z_ada.shape[0]))],
++        )
++        return suffix[:, 0].astype(jnp.float32)
++
++    def compute_loss(self, rng, observation, actions, *, train=False):
++        if observation.ode_start is None or observation.ode_pose_scale is None:
++            raise ValueError("ODE training requires reference start and pose normalization slope")
++        if observation.action_valid_mask is None:
++            raise ValueError("ODE training requires explicit episode padding mask")
++        aug_key, perturb_key = jax.random.split(rng)
++        obs = model.preprocess_observation(aug_key, observation, train=train)
++        c = self.condition(obs)
++        a0, target = obs.ode_start, actions[..., :6]
++        if train:
++            a0, target = ode_field.perturb_targets(perturb_key, a0, target, obs.ode_pose_scale)
++        path = ode_field.integrate(self.field, a0, obs.state[..., :8], c)
++        return ode_field.path_loss(path, target, self.grip_head(c), actions[..., 6], obs.action_valid_mask)
++
++    def sample_actions(self, rng, observation):
++        del rng  # Pure ODE is deterministic; no FM source noise.
++        if observation.ode_start is None:
++            raise ValueError("Client must supply per-episode reference start")
++        obs = model.preprocess_observation(None, observation, train=False)
++        c = self.condition(obs)
++        path = ode_field.integrate(self.field, obs.ode_start, obs.state[..., :8], c)
++        grip = jnp.where(self.grip_head(c) >= 0, 1., -1.)
++        actions = jnp.concatenate([path, grip[..., None]], axis=-1)
++        return jnp.pad(actions, ((0, 0), (0, 0), (0, self.action_dim-7)))
+diff --git a/src/openpi/models/pi05_ode_vlmquery.py b/src/openpi/models/pi05_ode_vlmquery.py
+new file mode 100644
+index 0000000..19d806e
+--- /dev/null
++++ b/src/openpi/models/pi05_ode_vlmquery.py
+@@ -0,0 +1,44 @@
++"""ODE head conditioned by one learned readout token in the VLM; no action expert or flow-time branch."""
++import dataclasses
++from flax import nnx
++from flax.nnx import bridge
++import jax
++import jax.numpy as jnp
++from openpi.models import gemma, model, ode_field, pi0, siglip
++from openpi.models.pi05_ode import Pi05ODE, Pi05ODEConfig
++
++@dataclasses.dataclass(frozen=True)
++class Pi05ODEVLMQueryConfig(Pi05ODEConfig):
++    action_horizon: int = 8
++    def __post_init__(self):
++        super().__post_init__()
++        if self.action_horizon != 8 or self.paligemma_variant != 'gemma_2b':
++            raise ValueError('The VLM-query ODE head requires Gemma 2B and H = 8')
++    def create(self, rng):
++        return Pi05ODEVLMQuery(self, nnx.Rngs(rng))
++
++class Pi05ODEVLMQuery(Pi05ODE):
++    def __init__(self, config, rngs):
++        # Do not call Pi05ODE.__init__: it allocates an unwanted expert.
++        model.BaseModel.__init__(self,config.action_dim,config.action_horizon,config.max_token_len)
++        vlm=gemma.get_config(config.paligemma_variant)
++        assert vlm.width == 2048
++        llm=bridge.ToNNX(gemma.Module(configs=[vlm],embed_dtype=config.dtype,adarms=False))
++        llm.lazy_init(rngs=rngs,method='init',use_adarms=[False])
++        img=bridge.ToNNX(siglip.Module(num_classes=vlm.width,variant='So400m/14',pool_type='none',scan=True,dtype_mm=config.dtype))
++        img.lazy_init(next(iter(config.fake_obs().images.values())),train=False,rngs=rngs)
++        self.PaliGemma=nnx.Dict(llm=llm,img=img)
++        self.query=nnx.Param(jax.random.normal(rngs.params(),(1,1,2048))*0.02)
++        self.field=ode_field.VectorField(2048,8,config.field_width,rngs=rngs)
++        self.grip_head=ode_field.GripperHead(2048,8,rngs=rngs)
++        self.deterministic=True
++
++    def condition(self, observation):
++        prefix,valid,ar=self.embed_prefix(observation)
++        query=jnp.broadcast_to(self.query.value,(prefix.shape[0],1,2048)).astype(prefix.dtype)
++        tokens=jnp.concatenate((prefix,query),axis=1)
++        valid=jnp.concatenate((valid,jnp.ones((prefix.shape[0],1),bool)),axis=1)
++        # Query reads prefix and itself; prefix cannot read the query.
++        ar=jnp.concatenate((ar,jnp.ones((1,),bool)))
++        (out,),_=self.PaliGemma.llm([tokens],mask=pi0.make_attn_mask(valid,ar),positions=jnp.cumsum(valid,axis=1)-1)
++        return out[:,-1].astype(jnp.float32)
+diff --git a/src/openpi/models/pi05_ode_vlmquery_test.py b/src/openpi/models/pi05_ode_vlmquery_test.py
+new file mode 100644
+index 0000000..043b524
+--- /dev/null
++++ b/src/openpi/models/pi05_ode_vlmquery_test.py
+@@ -0,0 +1,68 @@
++from types import SimpleNamespace
++import jax
++import jax.numpy as jnp
++import numpy as np
++import pytest
++from flax import nnx
++from flax.nnx import bridge
++from openpi.models import gemma,pi0
++from openpi.models.pi05_ode_vlmquery import Pi05ODEVLMQuery,Pi05ODEVLMQueryConfig
++from openpi.training.vlmquery_weight_loader import migrate
++from openpi.training.ode_weight_loader import REMOVED
++from flax.traverse_util import unflatten_dict
++
++def test_production_condition_uses_single_vlm_stream_and_no_state():
++    prefix=jnp.arange(4*2048,dtype=jnp.float32).reshape(1,4,2048)*1e-4
++    valid=jnp.array([[True,True,False,True]])
++    calls=[]
++    def llm(xs,*,mask,positions):
++        assert len(xs)==1 and xs[0].shape==(1,5,2048)
++        assert not np.asarray(mask)[0,:4,4].any()
++        np.testing.assert_array_equal(np.asarray(mask)[0,4],[True,True,False,True,True])
++        calls.append(1)
++        return [xs[0]],None
++    net=SimpleNamespace(query=nnx.Param(jnp.ones((1,1,2048))),PaliGemma=SimpleNamespace(llm=llm),
++        embed_prefix=lambda obs:(prefix,valid,jnp.zeros(4,bool)))
++    a=Pi05ODEVLMQuery.condition(net,SimpleNamespace(state=jnp.zeros((1,32)),ode_start=jnp.zeros((1,6))))
++    b=Pi05ODEVLMQuery.condition(net,SimpleNamespace(state=jnp.ones((1,32))*999,ode_start=jnp.ones((1,6))*999))
++    np.testing.assert_array_equal(a,b)
++    assert a.shape==(1,2048) and len(calls)==2
++
++def test_single_stream_gemma_query_gradient_and_prefix_isolation():
++    cfg=gemma.Config(width=32,depth=2,mlp_dim=64,num_heads=2,num_kv_heads=1,head_dim=16)
++    net=bridge.ToNNX(gemma.Module(configs=[cfg],embed_dtype='float32',adarms=False))
++    valid=jnp.array([[True,True,False,True,True]])
++    mask=pi0.make_attn_mask(valid,jnp.array([False,False,False,False,True]))
++    pos=jnp.cumsum(valid,axis=1)-1
++    x=jax.random.normal(jax.random.key(1),(1,5,32))
++    net.lazy_init([x],mask=mask,positions=pos,rngs=nnx.Rngs(2))
++    graph,state=nnx.split(net)
++    def forward(st,x):return nnx.merge(graph,st)([x],mask=mask,positions=pos)[0][0]
++    y=forward(state,x)
++    z=forward(state,x.at[:,-1].add(2))
++    # Only valid prefix outputs are meaningful; fully masked padding rows are discarded.
++    np.testing.assert_allclose(y[:,[0,1,3]],z[:,[0,1,3]],atol=1e-6)
++    changed=forward(state,x.at[:,2].set(999))
++    np.testing.assert_allclose(y[:,-1],changed[:,-1],atol=1e-6)
++    grad_st,grad_x=jax.grad(lambda st,x:jnp.sum(forward(st,x)[:,-1]*jnp.arange(32)),argnums=(0,1))(state,x)
++    assert np.linalg.norm(grad_x[:,0])>0 and np.linalg.norm(grad_x[:,-1])>0
++    assert sum(float(jnp.sum(v*v)) for v in jax.tree.leaves(grad_st))>0
++
++def test_config_and_state_tokenization_disabled():
++    c=Pi05ODEVLMQueryConfig()
++    assert c.action_horizon==8 and not c.discrete_state_input
++    with pytest.raises(ValueError):Pi05ODEVLMQueryConfig(action_horizon=5)
++    with pytest.raises(ValueError):Pi05ODEVLMQueryConfig(discrete_state_input=True)
++
++def test_strict_migration_rejects_missing_vlm_and_extra_parameters():
++    src={k:np.zeros((1,),np.float32) for k in REMOVED}
++    src.update({'PaliGemma/llm/layers/mlp_1/linear':np.ones((1,),np.float32),
++                'PaliGemma/img/w':np.ones((1,),np.float32)})
++    ref={'PaliGemma/img/w':np.zeros((1,),np.float32),'query':np.zeros((1,),np.float32),
++         'field/w':np.zeros((1,),np.float32),'grip_head/w':np.zeros((1,),np.float32)}
++    result=migrate(unflatten_dict(src,sep='/'),unflatten_dict(ref,sep='/'))
++    np.testing.assert_array_equal(result['PaliGemma']['img']['w'],[1])
++    bad=dict(src);bad.pop('PaliGemma/img/w')
++    with pytest.raises(ValueError):migrate(unflatten_dict(bad,sep='/'),unflatten_dict(ref,sep='/'))
++    bad=dict(src);bad['surprise']=np.zeros(1)
++    with pytest.raises(ValueError):migrate(unflatten_dict(bad,sep='/'),unflatten_dict(ref,sep='/'))
+diff --git a/src/openpi/policies/libero_policy.py b/src/openpi/policies/libero_policy.py
+index fe5aab0..3479b9d 100644
+--- a/src/openpi/policies/libero_policy.py
++++ b/src/openpi/policies/libero_policy.py
+@@ -73,6 +73,8 @@ class LiberoInputs(transforms.DataTransformFn):
+         # Actions are only available during training.
+         if "actions" in data:
+             inputs["actions"] = data["actions"]
++        if "actions_is_pad" in data:
++            inputs["action_valid_mask"] = ~np.asarray(data["actions_is_pad"], dtype=bool)
+ 
+         # Pass the prompt (aka language instruction) to the model.
+         # Keep this for your own dataset (but modify the key if the instruction is not
+@@ -98,3 +100,20 @@ class LiberoOutputs(transforms.DataTransformFn):
+         # For Libero, we only return the first 7 actions (since the rest is padding).
+         # For your own dataset, replace `7` with the action dimension of your dataset.
+         return {"actions": np.asarray(data["actions"][..., :7])}
++
++
++@dataclasses.dataclass(frozen=True)
++class LiberoODEInputs(LiberoInputs):
++    """LIBERO inputs for the ODE head: sign-continuous proprioception and the reference start."""
++
++    def __call__(self, data):
++        # Supplied by the training cache or, at inference, by the per-episode client state.
++        # Fail closed rather than accidentally reading the raw axis-angle state as a quaternion.
++        if "ode_proprio" not in data or "ode_start" not in data:
++            raise ValueError("ODE requires explicit proprioception and per-episode reference start")
++        result = super().__call__(data)
++        result["state"] = np.asarray(data["ode_proprio"], dtype=np.float32)
++        result["ode_start"] = np.asarray(data["ode_start"], dtype=np.float32)
++        if result["state"].shape != (8,) or result["ode_start"].shape != (6,):
++            raise ValueError("Invalid unbatched ODE proprioception/reference shape")
++        return result
+diff --git a/src/openpi/policies/policy.py b/src/openpi/policies/policy.py
+index b9b708b..e9a0a2b 100644
+--- a/src/openpi/policies/policy.py
++++ b/src/openpi/policies/policy.py
+@@ -93,6 +93,8 @@ class Policy(BasePolicy):
+             "state": inputs["state"],
+             "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+         }
++        if not self._is_pytorch_model:
++            jax.block_until_ready(outputs['actions'])
+         model_time = time.monotonic() - start_time
+         if self._is_pytorch_model:
+             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
+diff --git a/src/openpi/policies/policy_config.py b/src/openpi/policies/policy_config.py
+index 6570df0..817d05a 100644
+--- a/src/openpi/policies/policy_config.py
++++ b/src/openpi/policies/policy_config.py
+@@ -63,6 +63,14 @@ def create_trained_policy(
+             raise ValueError("Asset id is required to load norm stats.")
+         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+ 
++    input_normalizer = transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm)
++    output_normalizer = transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm)
++    if data_config.ode_cache_path:
++        # ODE head: limits normalisation of poses (see openpi.shared.ode_data)
++        from openpi.shared.ode_data import ODENormalize, ODEUnnormalize
++
++        input_normalizer, output_normalizer = ODENormalize(norm_stats), ODEUnnormalize(norm_stats)
++
+     # Determine the device to use for PyTorch models
+     if is_pytorch and pytorch_device is None:
+         try:
+@@ -78,12 +86,12 @@ def create_trained_policy(
+             *repack_transforms.inputs,
+             transforms.InjectDefaultPrompt(default_prompt),
+             *data_config.data_transforms.inputs,
+-            transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
++            input_normalizer,
+             *data_config.model_transforms.inputs,
+         ],
+         output_transforms=[
+             *data_config.model_transforms.outputs,
+-            transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
++            output_normalizer,
+             *data_config.data_transforms.outputs,
+             *repack_transforms.outputs,
+         ],
+diff --git a/src/openpi/shared/ode_client.py b/src/openpi/shared/ode_client.py
+new file mode 100644
+index 0000000..6b3b8b5
+--- /dev/null
++++ b/src/openpi/shared/ode_client.py
+@@ -0,0 +1,41 @@
++"""Per-episode ODE state, held by client, never shared by policy service."""
++import numpy as np
++from scipy.spatial.transform import Rotation
++
++from openpi.shared.ode_pose import measured_pose, track_targets
++
++
++class ODEReferenceState:
++    def __init__(self):
++        self.reference = None
++        self.previous_quat = None
++
++    def observe(self, state):
++        state = np.asarray(state, np.float32)
++        if state.shape != (8,) or not np.isfinite(state).all():
++            raise ValueError('Expected finite current robot state8')
++        q = Rotation.from_rotvec(state[3:6]).as_quat().astype(np.float32)
++        if self.previous_quat is None:
++            if q[np.argmax(np.abs(q))] < 0:
++                q *= -1
++        elif np.dot(q,self.previous_quat) < 0:
++            q *= -1
++        self.previous_quat = q.copy()
++        if self.reference is None:
++            self.reference = measured_pose(state[None])[0].astype(np.float32)
++        grip = 1-2*np.clip(np.abs(state[6:8]).mean()/0.04,0,1)
++        return {'ode_start':self.reference.copy(),
++                'ode_proprio':np.r_[state[:3],q,grip].astype(np.float32)}
++
++    def command(self, target, state):
++        target = np.asarray(target,np.float32)
++        if target.shape != (7,) or not np.isfinite(target).all():
++            raise ValueError('Expected finite pose6+gripper target')
++        return track_targets(target[None,:6],np.asarray(state)[None],target[None,6])[0]
++
++    def commit_executed(self, target):
++        """Call only after env.step succeeds; predicted-but-unexecuted tail is ignored."""
++        target = np.asarray(target,np.float32)
++        if target.shape != (7,) or not np.isfinite(target).all():
++            raise ValueError('Expected finite executed reference target')
++        self.reference = target[:6].copy()
+diff --git a/src/openpi/shared/ode_client_test.py b/src/openpi/shared/ode_client_test.py
+new file mode 100644
+index 0000000..836f836
+--- /dev/null
++++ b/src/openpi/shared/ode_client_test.py
+@@ -0,0 +1,27 @@
++import numpy as np
++from openpi.shared.ode_client import ODEReferenceState
++from openpi.shared.ode_data import proprioception
++from openpi.shared.ode_pose import virtual_targets, measured_pose
++
++
++def test_carry_only_executed_reference_and_reset_isolation():
++    a, b = ODEReferenceState(), ODEReferenceState()
++    s = np.zeros(8,np.float32)
++    s[:3] = [.4,.1,.3]
++    start = a.observe(s)['ode_start']
++    command = np.array([[.5,0,0,0,0,0,-1]],np.float32)
++    target = np.r_[virtual_targets(s[None],command)[0],-1].astype(np.float32)
++    np.testing.assert_allclose(a.command(target,s),command[0],atol=1e-6)
++    np.testing.assert_array_equal(a.observe(s)['ode_start'],start)
++    a.commit_executed(target)
++    np.testing.assert_array_equal(a.observe(s)['ode_start'],target[:6])
++    np.testing.assert_allclose(b.observe(s)['ode_start'],measured_pose(s[None])[0],atol=1e-6)
++    assert not np.array_equal(b.reference,a.reference)
++
++
++def test_train_and_client_proprioception_are_identical():
++    rng = np.random.default_rng(42)
++    s = rng.normal(size=(100,8)).astype(np.float32)
++    state = ODEReferenceState()
++    actual = np.stack([state.observe(row)['ode_proprio'] for row in s])
++    np.testing.assert_allclose(actual,proprioception(s),atol=1e-6)
+diff --git a/src/openpi/shared/ode_data.py b/src/openpi/shared/ode_data.py
+new file mode 100644
+index 0000000..5a1118e
+--- /dev/null
++++ b/src/openpi/shared/ode_data.py
+@@ -0,0 +1,95 @@
++"""Auditable episode-local supervision and author's linear normalization."""
++import numpy as np
++from scipy.spatial.transform import Rotation
++
++from openpi.shared.normalize import NormStats
++
++
++def proprioception(state, previous_quat=None):
++    """Convert ONE episode/contiguous sequence. Caller owns quaternion continuity."""
++    state = np.asarray(state, dtype=np.float32)
++    if state.ndim != 2 or state.shape[1] != 8 or not np.isfinite(state).all():
++        raise ValueError("Expected finite (T,8) OpenPI state")
++    quat = Rotation.from_rotvec(state[:, 3:6]).as_quat().astype(np.float32)
++    previous = previous_quat
++    for q in quat:
++        if previous is None:
++            if q[np.argmax(np.abs(q))] < 0:
++                q *= -1
++        elif np.dot(q, previous) < 0:
++            q *= -1
++        previous = q
++    grip = 1 - 2*np.clip(np.abs(state[:, 6:8]).mean(-1)/0.04, 0, 1)
++    return np.concatenate([state[:, :3], quat, grip[:, None]], -1)
++
++
++def limits_stats(values):
++    """Exact author limits-mode affine map, stored in OpenPI's asset schema.
++
++    mean/std here encode center/inverse slope, NOT sample moments. Must use
++    ODENormalize, not standard OpenPI Normalize (which adds epsilon).
++    """
++    values = np.asarray(values, dtype=np.float32)
++    low, high = values.min(axis=0), values.max(axis=0)
++    span = high-low
++    constant = span < 1e-4
++    scale = 2/np.where(constant, 2., span)
++    offset = np.where(constant, -low, -1-scale*low)
++    return NormStats(mean=-offset/scale, std=1/scale)
++
++
++class ODENormalize:
++    def __init__(self, stats):
++        self.stats = stats
++
++    def __call__(self, data):
++        if self.stats is None or not {'state', 'actions', 'ode_start'} <= self.stats.keys():
++            raise ValueError("Missing ODE normalization assets")
++        result = dict(data)
++        for key in ('state', 'actions', 'ode_start'):
++            if key in result:
++                stat = self.stats[key]
++                result[key] = ((np.asarray(result[key])-stat.mean)/stat.std).astype(np.float32)
++        result['ode_pose_scale'] = (1/self.stats['ode_start'].std).astype(np.float32)
++        return result
++
++
++class ODEUnnormalize:
++    def __init__(self, stats):
++        self.stats = stats
++
++    def __call__(self, data):
++        result = dict(data)
++        stat = self.stats['actions']
++        result['actions'] = np.asarray(data['actions'])[..., :7]*stat.std+stat.mean
++        return result
++
++
++class ODETargetDataset:
++    """Keep original LeRobot images/indices; replace only supervision from cache."""
++    def __init__(self, dataset, cache_path, horizon=8):
++        self.horizon = horizon
++        self.dataset = dataset
++        with np.load(cache_path, allow_pickle=False) as cache:
++            self.cache = {k: cache[k] for k in cache.files}
++        if len(dataset) != len(self.cache['episode_index']):
++            raise ValueError('Dataset/cache row count mismatch')
++
++    def __len__(self):
++        return len(self.dataset)
++
++    def __getitem__(self, index):
++        item = dict(self.dataset[index])
++        cache = self.cache
++        for key in ('episode_index', 'frame_index'):
++            if int(item[key]) != int(cache[key][index]):
++                raise ValueError(f'Dataset/cache index mismatch: {key} row {index}')
++        ids = index + np.arange(self.horizon)
++        end = int(cache['episode_end'][index])
++        valid = ids < end
++        ids = np.minimum(ids, end-1)
++        item['actions'] = cache['actions'][ids]
++        item['actions_is_pad'] = ~valid
++        item['ode_start'] = cache['start'][index]
++        item['ode_proprio'] = cache['proprio'][index]
++        return item
+diff --git a/src/openpi/shared/ode_data_test.py b/src/openpi/shared/ode_data_test.py
+new file mode 100644
+index 0000000..2e573a4
+--- /dev/null
++++ b/src/openpi/shared/ode_data_test.py
+@@ -0,0 +1,52 @@
++import numpy as np
++import pytest
++
++from openpi.shared.ode_data import limits_stats, ODENormalize, ODEUnnormalize, ODETargetDataset, proprioception
++from openpi.shared.normalize import NormStats
++
++
++def test_limits_and_constant_dimensions():
++    values = np.array([[1, 4], [3, 4]], np.float32)
++    stats = limits_stats(values)
++    np.testing.assert_allclose((values-stats.mean)/stats.std, [[-1, 0], [1, 0]])
++
++
++def test_pose_and_start_share_norm_and_gripper_unchanged():
++    pose = limits_stats(np.array([np.zeros(6), np.arange(1, 7)], np.float32))
++    stats = {'ode_start':pose,'state':NormStats(mean=np.zeros(8),std=np.ones(8)),
++             'actions':NormStats(mean=np.r_[pose.mean,0],std=np.r_[pose.std,1])}
++    data = {'ode_start':np.ones(6),'state':np.ones(8),'actions':np.ones((8,7))}
++    got = ODENormalize(stats)(data)
++    np.testing.assert_allclose(got['ode_start'], got['actions'][0,:6])
++    np.testing.assert_allclose(got['ode_pose_scale'], 1/pose.std)
++    np.testing.assert_array_equal(got['actions'][:,6], 1)
++    np.testing.assert_allclose(ODEUnnormalize(stats)(got)['actions'],data['actions'])
++
++
++def test_cache_episode_boundary_and_index_identity(tmp_path):
++    path = tmp_path/'cache.npz'
++    ep = np.array([0]*10+[1]*2)
++    frame = np.r_[np.arange(10),np.arange(2)]
++    actions = np.arange(12*7).reshape(12,7).astype(np.float32)
++    np.savez(path,episode_index=ep,frame_index=frame,actions=actions,start=np.zeros((12,6)),
++             proprio=np.zeros((12,8)),episode_end=np.array([10]*10+[12]*2))
++    dataset = [{'episode_index':e,'frame_index':f} for e,f in zip(ep,frame,strict=True)]
++    wrapped = ODETargetDataset(dataset,path)
++    np.testing.assert_array_equal(wrapped[2]['actions'],actions[2:10])
++    np.testing.assert_array_equal(wrapped[9]['actions'],np.broadcast_to(actions[9],(8,7)))
++    np.testing.assert_array_equal(wrapped[9]['actions_is_pad'],[False]+[True]*7)
++    np.testing.assert_array_equal(wrapped[10]['actions'][:2],actions[10:])
++    dataset[0]['frame_index']=99
++    with pytest.raises(ValueError):
++        wrapped[0]
++
++
++def test_proprio_quaternion_and_mirrored_fingers():
++    state = np.zeros((2,8),np.float32)
++    state[:,3] = [3.13,-3.13]
++    state[:,6:] = [[.04,-.04],[0,0]]
++    converted = proprioception(state)
++    assert np.dot(converted[0,3:7],converted[1,3:7]) > .99
++    np.testing.assert_array_equal(converted[:,-1],[-1,1])
++    one = proprioception(state[1:],previous_quat=converted[0,3:7])
++    np.testing.assert_allclose(one,converted[1:])
+diff --git a/src/openpi/shared/ode_pose.py b/src/openpi/shared/ode_pose.py
+new file mode 100644
+index 0000000..1e9dd72
+--- /dev/null
++++ b/src/openpi/shared/ode_pose.py
+@@ -0,0 +1,74 @@
++"""LIBERO virtual targets, in physical units (CPU preprocessing/client only).
++
++Port of the pinned author's pose.py/build_ode_zarr.py. This module accepts only
++robot state and commanded actions, never object state or future observations.
++The current OpenPI state layout is xyz, world rotation-vector, two finger qpos.
++"""
++import numpy as np
++from scipy.spatial.transform import Rotation
++
++POS_SCALE = 0.05
++ROT_SCALE = 0.5
++CANONICAL_QUAT = np.array([0.99959104, -0.00150985, -0.02851977, 0.00144439])
++REFERENCE = Rotation.from_quat(CANONICAL_QUAT)
++
++
++def _array(value, dim):
++    value = np.asarray(value, dtype=np.float64)
++    if value.ndim != 2 or value.shape[1] != dim or not np.isfinite(value).all():
++        raise ValueError(f'Expected finite (N,{dim}), got {value.shape}')
++    return value
++
++
++def measured_pose(state):
++    state = _array(state, 8)
++    relative = (Rotation.from_rotvec(state[:, 3:6]) * REFERENCE.inv()).as_rotvec()
++    return np.concatenate([state[:, :3], relative], axis=-1)
++
++
++def virtual_targets(state, commands):
++    state, commands = _array(state, 8), _array(commands, 7)
++    if len(state) != len(commands):
++        raise ValueError('State/command rows must match')
++    cmd = np.clip(commands, -1, 1)
++    position = state[:, :3] + POS_SCALE * cmd[:, :3]
++    rotation = Rotation.from_rotvec(ROT_SCALE * cmd[:, 3:6]) * Rotation.from_rotvec(state[:, 3:6])
++    relative = (rotation * REFERENCE.inv()).as_rotvec()
++    return np.concatenate([position, relative], axis=-1)
++
++
++def track_targets(targets, current_state, gripper):
++    """Gain=1, no velocity feedforward. Output actual normalized OSC commands."""
++    targets, state = _array(targets, 6), _array(current_state, 8)
++    grip = np.asarray(gripper, dtype=np.float64).reshape(-1, 1)
++    if len(targets) != len(state) or len(grip) != len(state) or not np.isfinite(grip).all():
++        raise ValueError('Target/state/gripper rows must match and be finite')
++    desired = Rotation.from_rotvec(targets[:, 3:6]) * REFERENCE
++    error = (desired * Rotation.from_rotvec(state[:, 3:6]).inv()).as_rotvec()
++    cmd = np.concatenate([(targets[:, :3] - state[:, :3]) / POS_SCALE, error / ROT_SCALE, grip], -1)
++    return np.clip(cmd, -1, 1).astype(np.float32)
++
++
++def episode_targets(state, commands):
++    """For observation t: start=r[t-1], target=r[t], gripper=u[t,6].
++
++    Input must be exactly ONE episode. Retains final command's target (unlike
++    shifted storage which drops it); future windows are masked at the boundary.
++    """
++    state, commands = _array(state, 8), _array(commands, 7)
++    if len(state) == 0:
++        raise ValueError('Empty episode')
++    target = virtual_targets(state, commands)
++    start = np.concatenate([measured_pose(state[:1]), target[:-1]], axis=0)
++    return start.astype(np.float32), target.astype(np.float32), np.clip(commands[:, 6], -1, 1).astype(np.float32)
++
++
++def target_window(target, gripper, index, horizon=8):
++    target = _array(target, 6)
++    gripper = np.asarray(gripper)
++    if horizon <= 0 or not 0 <= index < len(target) or gripper.shape != (len(target),):
++        raise ValueError('Invalid window or gripper shape')
++    ids = index + np.arange(horizon)
++    valid = ids < len(target)
++    ids = np.minimum(ids, len(target) - 1)
++    return target[ids].astype(np.float32), gripper[ids].astype(np.float32), valid
+diff --git a/src/openpi/shared/ode_pose_test.py b/src/openpi/shared/ode_pose_test.py
+new file mode 100644
+index 0000000..8eaa5b0
+--- /dev/null
++++ b/src/openpi/shared/ode_pose_test.py
+@@ -0,0 +1,56 @@
++import numpy as np
++import pytest
++from scipy.spatial.transform import Rotation
++from openpi.shared.ode_pose import measured_pose, virtual_targets, track_targets, episode_targets, target_window
++
++
++def fixture(n=1000):
++    rng = np.random.default_rng(42)
++    state = rng.normal(size=(n, 8))
++    state[:, 3:6] = Rotation.random(n, random_state=rng).as_rotvec()
++    cmd = rng.uniform(-1, 1, (n, 7))
++    cmd[:, 6] = rng.choice([-1., 1.], n)
++    return state, cmd
++
++
++def test_roundtrip_full_rotations_and_float32_storage():
++    state, cmd = fixture()
++    ref = virtual_targets(state, cmd).astype(np.float32)
++    recovered = track_targets(ref, state, cmd[:, 6])
++    np.testing.assert_allclose(recovered, cmd, atol=1e-5, rtol=0)
++
++
++def test_world_rotation_composition():
++    state, cmd = fixture(1)
++    ref = virtual_targets(state, cmd)
++    measured = measured_pose(state)
++    # Noncommuting rotations must not silently become vector addition.
++    assert np.linalg.norm(ref[:, 3:] - (measured[:, 3:] + .5 * cmd[:, 3:6])) > .001
++
++
++def test_first_previous_future_gripper_and_boundary():
++    state, cmd = fixture(10)
++    cmd[:, 6] = [-1, 1] * 5
++    start, target, grip = episode_targets(state, cmd)
++    np.testing.assert_allclose(start[0], measured_pose(state[:1])[0], atol=1e-6)
++    np.testing.assert_array_equal(start[1:], target[:-1])
++    future, g, valid = target_window(target, grip, 2)
++    np.testing.assert_array_equal(future, target[2:10])
++    np.testing.assert_array_equal(g, cmd[2:10, 6])
++    assert valid.all()
++    future, g, valid = target_window(target, grip, 9)
++    np.testing.assert_array_equal(valid, [True] + [False] * 7)
++    np.testing.assert_array_equal(future[0], target[-1])
++    # A second episode resets the start, not the preceding episode's last ref.
++    start2, _, _ = episode_targets(state[3:], cmd[3:])
++    np.testing.assert_allclose(start2[0], measured_pose(state[3:4])[0], atol=1e-6)
++
++
++def test_clipping_and_nan_rejection():
++    state, cmd = fixture(2)
++    cmd *= 2
++    recovered = track_targets(virtual_targets(state, cmd), state, cmd[:, 6])
++    np.testing.assert_allclose(recovered, np.clip(cmd, -1, 1), atol=1e-6)
++    state[0, 0] = np.nan
++    with pytest.raises(ValueError):
++        virtual_targets(state, cmd)
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+index 4ca47e1..12d10e6 100644
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -90,6 +90,9 @@ class DataConfig:
+     # If true, will use the LeRobot dataset task to define the prompt.
+     prompt_from_task: bool = False
+ 
++    # ODE head: frame-aligned virtual-target supervision (see vla/pi05_ode/prepare_ode_data.py).
++    ode_cache_path: str | None = None
++
+     # Only used for RLDS data loader (ie currently only used for DROID).
+     rlds_data_dir: str | None = None
+     # Action space for DROID dataset.
+@@ -509,6 +512,10 @@ class TrainConfig:
+     num_workers: int = 2
+     # Number of train steps (batches) to run.
+     num_train_steps: int = 30_000
++    # If set, derive num_train_steps (and checkpoint once per epoch) from the length of the train loader.
++    num_train_epochs: int | None = None
++    # If set, stop after this many epochs while keeping the learning-rate schedule of num_train_epochs.
++    stop_after_epoch: int | None = None
+ 
+     # How often (in steps) to log training metrics.
+     log_interval: int = 100
+@@ -516,6 +523,8 @@ class TrainConfig:
+     save_interval: int = 1000
+     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+     keep_period: int | None = 5000
++    # Disable checkpoint writes for short profiling or smoke-test runs.
++    save_checkpoints: bool = True
+ 
+     # If true, will overwrite the checkpoint directory if it already exists.
+     overwrite: bool = False
+@@ -970,6 +979,71 @@ _CONFIGS = [
+     *polaris_config.get_polaris_configs(),
+ ]
+ 
++#
++# ODE action head (vla/pi05_ode in the ODE Policy repository).
++#
++@dataclasses.dataclass(frozen=True)
++class LeRobotODEDataConfig(LeRobotLiberoDataConfig):
++    """LIBERO for the ODE head: LeRobot frames and images, virtual-target supervision from a cache."""
++
++    def create(self, assets_dirs, model_config):
++        from openpi.models.pi05_ode import Pi05ODEConfig
++
++        if not isinstance(model_config, Pi05ODEConfig) or self.extra_delta_transform:
++            raise ValueError("ODE data requires an ODE model and no delta transform")
++        base = super().create(assets_dirs, model_config)
++        repack = dict(base.repack_transforms.inputs[0].structure)
++        repack.update(actions_is_pad="actions_is_pad", ode_start="ode_start", ode_proprio="ode_proprio")
++        return dataclasses.replace(
++            base,
++            use_quantile_norm=False,
++            repack_transforms=_transforms.Group(inputs=[_transforms.RepackTransform(repack)]),
++            data_transforms=_transforms.Group(
++                inputs=[libero_policy.LiberoODEInputs(model_config.model_type)],
++                outputs=[libero_policy.LiberoOutputs()],
++            ),
++        )
++
++
++def _ode_configs() -> list[TrainConfig]:
++    from openpi.models.pi05_ode_vlmquery import Pi05ODEVLMQueryConfig
++    from openpi.training.vlmquery_weight_loader import VLMQueryWeightLoader
++
++    # vla/pi05_ode/: holds assets/ (ODE cache + norm stats) and checkpoints/
++    ode_root = pathlib.Path(__file__).resolve().parents[4]
++    return [
++        # pi0.5 with the flow-matching action expert replaced by the ODE head: one learned query token
++        # read out of the VLM gives the condition c, and the vector field integrates 8 control steps.
++        # Full fine-tuning from pi05_base on all four LIBERO suites, 8 GPUs (FSDP), global batch 384.
++        TrainConfig(
++            name="pi05_libero_ode_vlmquery_h8",
++            model=Pi05ODEVLMQueryConfig(),
++            data=LeRobotODEDataConfig(
++                repo_id="physical-intelligence/libero",
++                assets=AssetsConfig(assets_dir=str(ode_root / "assets")),
++                base_config=DataConfig(
++                    prompt_from_task=True,
++                    ode_cache_path=str(ode_root / "assets" / "ode_targets.npz"),
++                ),
++            ),
++            weight_loader=VLMQueryWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++            batch_size=384,
++            lr_schedule=_optimizer.CosineDecaySchedule(
++                warmup_steps=100, peak_lr=5e-5, decay_steps=7_120, decay_lr=5e-6
++            ),
++            optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
++            ema_decay=None,
++            num_train_epochs=10,
++            num_train_steps=7_120,
++            fsdp_devices=8,
++            num_workers=8,
++            checkpoint_base_dir=str(ode_root / "checkpoints"),
++        ),
++    ]
++
++
++_CONFIGS.extend(_ode_configs())
++
+ if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
+     raise ValueError("Config names must be unique.")
+ _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
+diff --git a/src/openpi/training/data_loader.py b/src/openpi/training/data_loader.py
+index e2ee7dd..9acc2d8 100644
+--- a/src/openpi/training/data_loader.py
++++ b/src/openpi/training/data_loader.py
+@@ -148,6 +148,12 @@ def create_torch_dataset(
+     if data_config.prompt_from_task:
+         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+ 
++    if data_config.ode_cache_path:
++        # ODE head: same frames and images, supervision (virtual-target poses) from the cache
++        from openpi.shared.ode_data import ODETargetDataset
++
++        dataset = ODETargetDataset(dataset, data_config.ode_cache_path, horizon=action_horizon)
++
+     return dataset
+ 
+ 
+@@ -180,12 +186,17 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
+             )
+         norm_stats = data_config.norm_stats
+ 
++    normalizer = _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm)
++    if data_config.ode_cache_path and not skip_norm_stats:
++        from openpi.shared.ode_data import ODENormalize
++
++        normalizer = ODENormalize(norm_stats)
+     return TransformedDataset(
+         dataset,
+         [
+             *data_config.repack_transforms.inputs,
+             *data_config.data_transforms.inputs,
+-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
++            normalizer,
+             *data_config.model_transforms.inputs,
+         ],
+     )
+@@ -449,6 +460,14 @@ class TorchDataLoader:
+     def torch_loader(self) -> torch.utils.data.DataLoader:
+         return self._data_loader
+ 
++    def __len__(self) -> int:
++        return len(self._data_loader)
++
++    def set_epoch(self, epoch: int) -> None:
++        sampler = self._data_loader.sampler
++        if hasattr(sampler, "set_epoch"):
++            sampler.set_epoch(epoch)
++
+     def __iter__(self):
+         num_items = 0
+         while True:
+@@ -535,6 +554,13 @@ class DataLoaderImpl(DataLoader):
+     def data_config(self) -> _config.DataConfig:
+         return self._data_config
+ 
++    def __len__(self) -> int:
++        return len(self._data_loader)
++
++    def set_epoch(self, epoch: int) -> None:
++        if hasattr(self._data_loader, "set_epoch"):
++            self._data_loader.set_epoch(epoch)
++
+     def __iter__(self):
+         for batch in self._data_loader:
+             yield _model.Observation.from_dict(batch), batch["actions"]
+diff --git a/src/openpi/training/ode_weight_loader.py b/src/openpi/training/ode_weight_loader.py
+new file mode 100644
+index 0000000..6a5c814
+--- /dev/null
++++ b/src/openpi/training/ode_weight_loader.py
+@@ -0,0 +1,52 @@
++"""Strict official pi05 -> ODE (with action expert) migration, never used to resume ODE checkpoints."""
++import dataclasses
++import logging
++
++from flax.traverse_util import flatten_dict, unflatten_dict
++import numpy as np
++from scipy.special import expit
++
++from openpi.models import model
++from openpi.shared import download
++
++REMOVED = frozenset(f"{layer}/{param}" for layer in (
++    "time_mlp_in", "time_mlp_out", "action_in_proj", "action_out_proj",
++) for param in ("kernel", "bias"))
++NEW_ROOTS = frozenset(("query", "z_ada", "field", "grip_head"))
++
++
++def migrate(loaded, reference):
++    src, ref = flatten_dict(loaded, sep="/"), flatten_dict(reference, sep="/")
++    extra = set(src)-set(ref)
++    missing = set(ref)-set(src)
++    expected_new = (NEW_ROOTS - {'query'}) | {'query_in', 'query_out'} if 'query_in/kernel' in ref else NEW_ROOTS
++    if extra != REMOVED:
++        raise ValueError(f"Unexpected removed parameters: {extra ^ REMOVED}")
++    if any(k.split("/")[0] not in expected_new for k in missing):
++        raise ValueError(f"Unexpected missing parameters: {sorted(missing)}")
++    if set(k.split("/")[0] for k in missing) != expected_new:
++        raise ValueError("Missing expected new ODE parameter groups")
++    result = dict(ref)
++    for key in set(src) & set(ref):
++        if src[key].shape != ref[key].shape:
++            raise ValueError(f"Shape mismatch for {key}: {src[key].shape} != {ref[key].shape}")
++        result[key] = src[key].astype(ref[key].dtype)
++    width = ref["z_ada"].shape[0]
++    # At t=0, sin=0 and cos=1; no runtime time network is retained.
++    z = np.concatenate([np.zeros(width//2), np.ones(width//2)]).astype(np.float32)
++    for layer in ("time_mlp_in", "time_mlp_out"):
++        z = z @ src[f"{layer}/kernel"].astype(np.float32) + src[f"{layer}/bias"].astype(np.float32)
++        z = z * expit(z)
++    if z.shape != ref["z_ada"].shape or not np.isfinite(z).all():
++        raise ValueError("Invalid migrated adaRMS condition")
++    result["z_ada"] = z.astype(ref["z_ada"].dtype)
++    logging.info("ODE migration: inherited=%s removed=%s new=%s", len(set(src)&set(ref)), sorted(extra), sorted(missing))
++    return unflatten_dict(result, sep="/")
++
++
++@dataclasses.dataclass(frozen=True)
++class ODEBaseWeightLoader:
++    params_path: str
++
++    def load(self, params):
++        return migrate(model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray), params)
+diff --git a/src/openpi/training/ode_weight_loader_test.py b/src/openpi/training/ode_weight_loader_test.py
+new file mode 100644
+index 0000000..26c2787
+--- /dev/null
++++ b/src/openpi/training/ode_weight_loader_test.py
+@@ -0,0 +1,46 @@
++import copy
++
++import jax
++import jax.numpy as jnp
++import numpy as np
++import pytest
++
++from openpi.models.pi0 import posemb_sincos
++from openpi.training.ode_weight_loader import migrate
++
++
++def fixture():
++    rng = np.random.default_rng(42)
++    dense = lambda: {"kernel": rng.normal(size=(4, 4)).astype(np.float32), "bias": rng.normal(size=4).astype(np.float32)}
++    source = {"PaliGemma": {"dummy": np.ones(4, np.float32)}, **{k: dense() for k in (
++        "time_mlp_in", "time_mlp_out", "action_in_proj", "action_out_proj",
++    )}}
++    target = {"PaliGemma": {"dummy": np.zeros(4, np.float32)}, "z_ada": np.zeros(4, np.float32),
++              "query": np.ones((1, 1, 4), np.float32), "field": {"new": np.ones(3, np.float32)},
++              "grip_head": {"new": np.ones(4, np.float32)}}
++    return source, target
++
++
++def test_one_time_ada_initialization_matches_pretrained_time_path():
++    source, target = fixture()
++    got = migrate(source, target)
++    x = posemb_sincos(jnp.zeros((1,)), 4, 4e-3, 4.)
++    for key in ("time_mlp_in", "time_mlp_out"):
++        x = jax.nn.silu(x @ source[key]["kernel"] + source[key]["bias"])
++    np.testing.assert_allclose(got["z_ada"], x[0], atol=1e-6)
++    np.testing.assert_array_equal(got["PaliGemma"]["dummy"], source["PaliGemma"]["dummy"])
++    assert not set(got) & {"time_mlp_in", "time_mlp_out", "action_in_proj", "action_out_proj"}
++
++
++@pytest.mark.parametrize("mutation", ["extra", "missing", "shape"])
++def test_migration_rejects_unexplained_drift(mutation):
++    source, target = fixture()
++    source = copy.deepcopy(source)
++    if mutation == "extra":
++        source["surprise"] = np.ones(1)
++    elif mutation == "missing":
++        del source["PaliGemma"]
++    else:
++        source["PaliGemma"]["dummy"] = np.ones(5)
++    with pytest.raises(ValueError):
++        migrate(source, target)
+diff --git a/src/openpi/training/vlmquery_weight_loader.py b/src/openpi/training/vlmquery_weight_loader.py
+new file mode 100644
+index 0000000..fb2e8e9
+--- /dev/null
++++ b/src/openpi/training/vlmquery_weight_loader.py
+@@ -0,0 +1,32 @@
++"""Explicit, strict official pi05 -> VLM-only ODE parameter migration."""
++import dataclasses
++import numpy as np
++from flax.traverse_util import flatten_dict,unflatten_dict
++from openpi.models import model
++from openpi.shared import download
++from openpi.training.ode_weight_loader import REMOVED
++EXPERT_MODULES=frozenset(('attn_vec_einsum_1','q_einsum_1','kv_einsum_1','mlp_1','pre_attention_norm_1','pre_ffw_norm_1','final_norm_1'))
++def expert_key(key):
++    return key.startswith('PaliGemma/llm/') and bool(set(key.split('/')) & EXPERT_MODULES)
++def migrate(loaded,reference):
++    src,ref=flatten_dict(loaded,sep='/'),flatten_dict(reference,sep='/')
++    removed={k for k in src if expert_key(k)} | set(REMOVED)
++    if not {k for k in src if expert_key(k)}:
++        raise ValueError('Expected official checkpoint with expert parameters')
++    if set(src)-set(ref) != removed or not removed <= set(src):
++        raise ValueError('Unexpected removed/base parameter keys')
++    missing=set(ref)-set(src)
++    if {k.split('/')[0] for k in missing} != {'query','field','grip_head'}:
++        raise ValueError('Unexpected new/missing parameter groups')
++    if any(expert_key(k) for k in ref) or 'z_ada' in ref:
++        raise ValueError('Unexpected expert/time parameters in target')
++    result=dict(ref)
++    for k in set(src)&set(ref):
++        if src[k].shape != ref[k].shape:raise ValueError(f'Shape mismatch: {k}')
++        result[k]=src[k].astype(ref[k].dtype)
++    return unflatten_dict(result,sep='/')
++@dataclasses.dataclass(frozen=True)
++class VLMQueryWeightLoader:
++    params_path: str
++    def load(self,params):
++        return migrate(model.restore_params(download.maybe_download(self.params_path),restore_type=np.ndarray),params)
