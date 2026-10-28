@@ -118,20 +118,32 @@ conda env config vars set LIBERO_CONFIG_PATH="${LIBERO_CONFIG_DIR}" > /dev/null
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_DIR}"
 echo "[setup] LIBERO config -> ${LIBERO_CONFIG_DIR} (LIBERO_CONFIG_PATH set for this env)"
 
+# Off-screen rendering (EGL) needs a GPU. On a machine without one (e.g. a login node) the
+# steps below use a non-EGL backend and the render check is skipped.
+if nvidia-smi -L 2>/dev/null | grep -q "^GPU"; then
+    export MUJOCO_GL=egl; HAS_GPU=1
+else
+    export MUJOCO_GL=glfw; HAS_GPU=0
+fi
+
 # robosuite writes a per-user macro file for render settings; without it every
 # env init prints a warning. Idempotent.
 python - <<'PYEOF' || true
 import os, site, subprocess
 cand = os.path.join(site.getsitepackages()[0], "robosuite", "scripts", "setup_macros.py")
 if os.path.exists(cand):
-    subprocess.run(["python", cand], check=False)
+    subprocess.run(["python", cand], check=False, capture_output=True)
 PYEOF
 
 echo "[setup] sanity check"
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 python -c "import numpy, zarr; print('numpy', numpy.__version__, 'zarr', zarr.__version__)"
 python -c "from libero.libero import get_libero_path; print('bddl dir:', get_libero_path('bddl_files'))"
-python -c "from libero.libero.envs import OffScreenRenderEnv; print('OffScreenRenderEnv ok')"
+if [[ "${HAS_GPU}" == "1" ]]; then
+    python -c "from libero.libero.envs import OffScreenRenderEnv; print('OffScreenRenderEnv ok')"
+else
+    echo "[setup] no GPU here: skipped the off-screen rendering check (run evaluation on a GPU machine)"
+fi
 python -c "from libero.libero import benchmark; print('benchmarks:', list(benchmark.get_benchmark_dict().keys()))"
 python -c "
 import os
