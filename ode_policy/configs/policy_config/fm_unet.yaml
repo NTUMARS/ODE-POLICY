@@ -1,0 +1,39 @@
+_target_: ode_policy.policies.fm.fm_unet_image_policy.FlowMatchingUnetImagePolicy
+
+
+shape_meta: ${shape_meta}
+
+obs_encoder:
+  _target_: ode_policy.utils.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  shape_meta: ${shape_meta}
+  rgb_model:
+    _target_: ode_policy.utils.vision.model_getter.get_resnet
+    name: resnet18
+    weights: null
+  resize_shape: null
+  crop_shape: null
+  # constant center crop
+  random_crop: True
+  use_group_norm: True
+  share_rgb_model: False
+  imagenet_norm: True
+
+horizon: ${horizon}
+n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+n_obs_steps: ${n_obs_steps}
+obs_as_global_cond: ${obs_as_global_cond}
+num_inference_steps: 10
+
+diffusion_step_embed_dim: 128
+# Parameter-matched to the DiT family so an architecture comparison is controlled:
+# [48, 96, 192] puts these policies at 36.00M against the DiT policies' 35.11M
+# (+2.5%), where the published Diffusion-Policy width [256, 512, 1024] would put
+# them at 192.52M — 5.5x more, and any win would be unattributable. kernel_size
+# stays at the upstream 5 so only one knob moved.
+# For the published capacity, override on the command line:
+#   policy_config.down_dims=[256,512,1024]
+down_dims: [48, 96, 192]
+kernel_size: 5
+n_groups: 8
+cond_predict_scale: True
+use_residual_images: False

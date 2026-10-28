@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ode-policy"
+version = "0.1.0"
+description = "Ordinary Differential Equation Policy: robot policies that integrate a learned velocity field in physical time."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+# The exact versions used for the paper are pinned in scripts/setup_env.sh (which also
+# installs robosuite / MuJoCo / LIBERO); these are the direct dependencies of the package.
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy<2",
+    "hydra-core>=1.3",
+    "omegaconf",
+    "zarr==2.17.2",
+    "numcodecs==0.12.1",
+    "numba",
+    "dill",
+    "einops",
+    "loguru",
+    "tqdm",
+    "scipy",
+    "scikit-learn",
+    "pandas",
+    "h5py",
+    "diffusers>=0.30,<0.40",
+    "torchcfm",
+    "transformers<5",
+    "imageio[ffmpeg]",
+    "matplotlib",
+    "opencv-python-headless",
+]
+
+[project.optional-dependencies]
+wandb = ["wandb"]
+
+[tool.setuptools.packages.find]
+include = ["ode_policy*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["third_party", "ode_policy/policies/act/detr"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501", "E402", "E731", "E741", "B007", "B023", "F841"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ode_policy"]

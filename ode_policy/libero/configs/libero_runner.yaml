@@ -1,0 +1,110 @@
+# LIBERO-native training config.
+#
+# Composes against the shared IL configs (policy_config / train_config) via the
+# hydra searchpath below, so every policy under
+# ode_policy/configs/policy_config/ is usable unchanged.
+#
+#   policy_name=ode python ode_policy/train.py \
+#     --config-path=$PWD/ode_policy/libero/configs \
+#     --config-name=libero_runner \
+#     task_name=libero_4suite \
+#     dataset_config.zarr_path=./data_policy/libero_4suite_50demo_ode_vt.zarr
+#
+# Prefer scripts/train_libero.sh, which sets the per-policy dataset, zarr and
+# history_source overrides for you.
+
+defaults:
+  - /dataset_config: libero_image_dataset
+  - /policy_config: ${oc.env:policy_name,ode}
+  - /train_config: default_train
+  # _self_ LAST so the top-level dataset_config / policy_config blocks at the
+  # bottom of this file win over the group defaults they are merged into.
+  - _self_
+
+policy_name: ${oc.env:policy_name,ode}
+task_name: libero_4suite
+name: libero_${task_name}
+_target_: ode_policy.libero.libero_train_runner.LiberoTrainRunner
+
+hydra:
+  searchpath:
+    - pkg://ode_policy.configs
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ./il_outputs/${policy_name}/${task_name}
+  sweep:
+    dir: ./il_outputs/${policy_name}/${task_name}
+    subdir: ${hydra.job.num}
+
+# LIBERO shapes.
+#   agent_pos = [eef_pos(3), eef_quat(4 xyzw, hemisphere-continuous), gripper(1)]
+#   action    = [delta_pos(3), delta_axis_angle(3), gripper_cmd(1)]  (raw demo actions)
+#   task_emb  = frozen CLIP ViT-B/32 text embedding of the task instruction.
+#               Change to 768 for clip-vit-large / t5-base — it must match the
+#               text_model the zarr was built with (recorded in its attrs).
+# NOTE state_dim(8) != action_dim(7): policies whose flow starts from the history
+# must run history_source=past_action (set at the bottom of this file).
+image_shape: &image_shape [3, 128, 128]
+shape_meta: &shape_meta
+  obs:
+    head_cam:
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [8]
+      type: low_dim
+    task_emb:
+      shape: [512]
+      type: low_dim
+  action:
+    shape: [7]
+
+exp_name: "libero_default"
+
+horizon: 16           # 8 history + 8 future
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+train_enable: True
+eval_enable: False
+eval_path: null
+
+multi_run:
+  run_dir: ./il_outputs/${policy_name}/${task_name}
+  wandb_name_base: ${task_name}
+
+logging:
+  project: ODE_Policy_${task_name}
+  resume: False
+  mode: disabled   # online: log to Weights & Biases (pip install wandb, wandb login)
+  name: ${task_name}
+  tags:
+    - ${task_name}
+    - ${policy_name}
+    - libero
+    - ${exp_name}
+  id: null
+  group: null
+
+checkpoint:
+  # No in-loop rollout on this path (eval is a separate LIBERO process), so the
+  # only monitorable quantity is the loss.
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 5
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.4f}.ckpt'
+  save_last_ckpt: True
+  save_last_snapshot: False
+  save_root_dir: ./il_outputs/${policy_name}/${task_name}
+
+# NOTE: history_source / noise_dims / dyn_target are injected per policy by
+# scripts/train_libero.sh, not merged here. A blanket block would also land on policies
+# that have no history mechanism (fm_dit, ddpm_dit, ...), where the keys are
+# silently swallowed by **kwargs and read as if those policies used them.

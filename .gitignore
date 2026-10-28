@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Data, checkpoints and outputs (created by the scripts)
+data_raw/
+data_policy/
+il_outputs/
+outputs/
+wandb/
+*.ckpt
+*.pth
+*.pt
+
+# Third-party checkouts made by scripts/setup_env.sh and scripts/setup_libero_plus.sh
+third_party/*
+!third_party/.gitignore
+
+# Hydra / simulator logs
+.hydra/
+MUJOCO_LOG.TXT
+*.log

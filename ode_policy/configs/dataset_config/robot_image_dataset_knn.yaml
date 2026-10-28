@@ -1,0 +1,65 @@
+_target_: ode_policy.datasets.robot_image_dataset_knn.RobotImageDatasetKNN
+zarr_path: data_policy/useless.zarr
+horizon: ${horizon}
+pad_before: ${eval:'${n_obs_steps}-1'}
+pad_after: ${eval:'${n_action_steps}-1'}
+seed: 42
+val_ratio: 0.02
+batch_size: 32
+max_train_episodes: null
+knn_k: 20
+# Future window for target_spread: must match the policy's future_actions
+# slicing (sequence indices [n_obs_steps-1 : n_obs_steps-1+n_action_steps]).
+n_obs_steps: ${n_obs_steps}
+n_action_steps: ${n_action_steps}
+# KNN neighbor key: "state" (n_obs proprioceptive history, default),
+# "image" (downsampled current-frame image — brittle pixel heuristic), or
+# "resnet" (frozen ResNet-18 current-frame features ⊕ proprio — task-agnostic,
+# recommended; same recipe for 2D and 3D).
+knn_key_source: state
+# Image→key method (only for knn_key_source=image):
+#   "redness" — small red agent, 2D synthetic (R-(G+B)/2 + max-pool)
+#   "gray"    — grayscale mean-pool (drops color)
+#   "rgb"     — downsampled color, keeps color cues (real tasks, e.g. stack_cube)
+#   "motion"  — downsampled color, keep only MOVING cells (drop static background);
+#               texture-free raw-pixel key, render-robust + color-preserving
+knn_image_mode: redness
+# Downsample grid (cells/side) for the image key. Larger = finer / less info loss.
+knn_image_grid: 16
+# knn_image_mode=motion: fraction of (highest-saliency / moving) cells to keep.
+knn_motion_keep: 0.5
+# Frozen image encoder for knn_key_source=resnet: "resnet18", "dinov2_vits14",
+# or "dinov2_vitb14" (DINOv2 = stronger / more render-robust).
+knn_img_backbone: resnet18
+# ResNet feature tap: "avgpool" (final 512-d) or "layer2"/"layer3" (mid-level
+# spatial map → more domain-general, discriminative on flat renders; keeps color).
+knn_resnet_layer: avgpool
+# Spatial grid the mid-level map is pooled to (key dim = channels * pool^2).
+knn_resnet_pool: 3
+# Grayscale before the encoder (drops color). Keep false when color matters
+# (e.g. stack_cube cube identity).
+knn_img_gray: false
+# Frozen backbone weights for knn_img_backbone=resnet18: "IMAGENET1K_V1" or "r3m".
+knn_resnet_weights: IMAGENET1K_V1
+# Proprio block weight relative to the unit-norm image block in the resnet key.
+knn_proprio_weight: 1.0
+# Zarr array for the proprio block — must be POSITION-level (joint angles / agent
+# xy), not velocity. "state" works for 3D joint_pos; 2D nav uses "agent_pos".
+knn_proprio_key: state
+# For knn_key_source=state: true → key is only the CURRENT frame's state (1 frame);
+# false → n_obs-frame state history.
+knn_state_current: false
+# State KNN key array (knn_key_source=state): POSITION-level. "state" (3D joint
+# angles) or "agent_pos" (2D nav, where state is velocity).
+knn_state_key: state
+# Per-neighbor distance kernel: null → uniform (every neighbor equal). A float =
+# softmax temperature over -distance/sqrt(key_dim); closer neighbors contribute
+# more (continuous, subtle-variance-sensitive).
+knn_weight_temp: null
+# Restrict KNN neighbors to OTHER demos. The tree covers every sample window in
+# the split, so with this off a sample's nearest neighbors are typically its own
+# demo's adjacent frames — their future chunks are time-shifted copies of the same
+# trajectory, which makes target_spread measure temporal action change instead of
+# cross-demo disagreement (and drives it toward 0 right at the forks). Set false
+# to reproduce the legacy global KNN.
+knn_cross_episode_only: true

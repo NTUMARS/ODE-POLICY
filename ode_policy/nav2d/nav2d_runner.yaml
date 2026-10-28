@@ -1,0 +1,70 @@
+# Training config for the 2D multimodal navigation task (ode_policy/nav2d).
+# 128px head_cam, agent_pos = agent POSITION, action = 2D velocity, 8 obs + 8 action steps.
+# Prefer scripts/run_nav2d.sh, which sets the per-method data and overrides:
+#
+#   policy_name=fm_dit python ode_policy/train.py \
+#     --config-path=$PWD/ode_policy/nav2d --config-name=nav2d_runner \
+#     train_config.training_params.num_epochs=20
+#
+# The trainer is the generic train runner (it has no LIBERO-specific code; it just
+# trains policy_config on dataset_config and saves checkpoints).
+
+defaults:
+  - /dataset_config: robot_image_dataset
+  - /policy_config: ${oc.env:policy_name,fm_dit}
+  - /train_config: default_train
+  - _self_
+
+policy_name: ${oc.env:policy_name,fm_dit}
+task_name: nav2d
+name: ${task_name}
+_target_: ode_policy.libero.libero_train_runner.LiberoTrainRunner
+
+hydra:
+  searchpath:
+    - pkg://ode_policy.configs
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ./il_outputs/${policy_name}/${task_name}
+
+dataset_config:
+  zarr_path: ./data_policy/nav2d_pos_200.zarr
+
+image_shape: &image_shape [3, 128, 128]
+shape_meta: &shape_meta
+  obs:
+    head_cam:
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [2]
+      type: low_dim
+  action:
+    shape: [2]
+
+exp_name: "nav2d"
+horizon: 16
+n_obs_steps: 8
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+train_enable: True
+eval_enable: False
+eval_path: null
+
+logging:
+  project: ODE_Policy_nav2d
+  resume: False
+  mode: disabled   # online: log to Weights & Biases (pip install wandb, wandb login)
+  name: ${task_name}
+  tags: [nav2d, "${policy_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  save_root_dir: ./il_outputs/${policy_name}/${task_name}

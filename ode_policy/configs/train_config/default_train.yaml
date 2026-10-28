@@ -1,0 +1,68 @@
+training_params:
+  device: "cuda:0"
+  seed: 42
+  debug: False
+  resume: False
+  reset_epoch_on_resume: False
+  # optimization
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  # the paper's schedule: 100 epochs (cosine). To look at early checkpoints only,
+  # set stop_at_epoch rather than num_epochs, so the LR schedule stays the same.
+  num_epochs: 100
+  # end training after this many epochs while keeping the LR schedule of num_epochs,
+  # for comparing early checkpoints cheaply. null = run all num_epochs.
+  stop_at_epoch: null
+  gradient_accumulate_every: 1
+  # EMA destroys performance when used with BatchNorm
+  # replace BatchNorm with GroupNorm.
+  use_ema: True
+  freeze_encoder: False
+  # training loop control
+  # in epochs
+  rollout_every: 50
+  checkpoint_every: 10
+  # explicit epochs to save, e.g. [1,10,20]; overrides checkpoint_every when set
+  checkpoint_epochs: null
+  val_every: 5
+  sample_every: 5
+  # steps per epoch (null = iterate the full dataset each epoch).
+  # Keep this null: the LR scheduler is built with
+  # num_training_steps = len(train_dataloader) * num_epochs, i.e. it assumes a
+  # FULL pass per epoch. Capping the loop without telling the scheduler leaves
+  # the cosine schedule stuck near its peak — with the old 250 cap on
+  # libero_object (2328 batches/epoch) only 10.7% of the schedule was ever
+  # traversed, so the LR never annealed.
+  max_train_steps: null
+  max_val_steps: 250
+  # misc
+  tqdm_interval_sec: 1.0
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+val_dataloader:
+  batch_size: 32
+  num_workers: 0
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+ema:
+  _target_: ode_policy.utils.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999

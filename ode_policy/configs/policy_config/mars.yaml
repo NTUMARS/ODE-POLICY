@@ -1,0 +1,74 @@
+# MARS Policy: End-to-end learned router for history/noise mixing
+# - Router network outputs weight directly (no score supervision)
+# - Learns from flow + consistency loss gradients automatically
+# - No dependency on cross_demo_var dataset
+
+_target_: ode_policy.policies.mars.mars_policy.MarsImagePolicy
+
+shape_meta: ${shape_meta}
+
+obs_encoder:
+  _target_: ode_policy.utils.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  shape_meta: ${shape_meta}
+  rgb_model:
+    _target_: ode_policy.utils.vision.model_getter.get_resnet
+    name: resnet18
+    weights: null
+  resize_shape: null
+  crop_shape: null
+  random_crop: True
+  use_group_norm: True
+  share_rgb_model: False
+  imagenet_norm: True
+
+horizon: ${horizon}
+n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+n_obs_steps: ${n_obs_steps}
+
+# Obs projector
+latent_dim: 512
+
+# DiT architecture
+# DiT size. Kept identical across every DiT policy in this repo (fm_dit,
+# ddpm_dit, a2a_dit, mars) so baseline comparisons are
+# controlled: a difference in success rate then reflects the method, not the
+# generator's capacity. Changing it here means changing it everywhere.
+hidden_dim: 512
+num_layers: 4
+num_heads: 8
+mlp_ratio: 4.0
+dropout: 0.1
+diffusion_step_embed_dim: 256
+
+# Loss weights
+flow_loss_weight: 1.0
+consistency_weight: 1.0
+
+# Router params (end-to-end, no score supervision)
+router_entropy_weight: 0.0
+
+# Diversity loss: penalize mode collapse for similar-history samples
+diversity_weight: 1.0
+diversity_k: 5
+
+# Adaptive sampling steps (inference only)
+adaptive_steps: true
+adaptive_max_steps: 10
+
+# Source of the flow's history signal.
+#   agent_pos   — reuse the state as a history-action surrogate; requires
+#                 state_dim == action_dim (metasim joint_pos tasks).
+#   past_action — use the real past actions; always valid, and REQUIRED on
+#                 LIBERO where state is an 8-dim pose and action a 7-dim delta.
+history_source: agent_pos
+# Action dims whose flow source is always Gaussian noise instead of the history.
+# null = none (metasim joint_pos: every dim is continuous). LIBERO sets [6] for
+# the near-binary gripper channel — see ode_policy/libero/configs/.
+noise_dims: null
+
+
+# Flow matcher
+flow_matcher:
+  _target_: ode_policy.utils.flow.flow_matchers.ConditionalFlowMatcher
+  sigma: 0.0
+  num_sampling_steps: 1

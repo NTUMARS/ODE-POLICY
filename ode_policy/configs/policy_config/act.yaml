@@ -1,0 +1,48 @@
+# ACT on the shared observation encoder used by every method in the paper.
+#
+# Same randomly-initialised ResNet18 (GroupNorm) as fm_dit / ddpm_dit / a2a_dit / ode, over all n_obs_steps frames
+# plus the CLIP task embedding; nothing pretrained. ACT's action model (CVAE over the chunk, DETR encoder-decoder,
+# L1 + KL, z = 0 at inference) is unchanged.
+# See ode_policy/policies/act/act_shared_encoder_policy.py.
+
+_target_: ode_policy.policies.act.act_shared_encoder_policy.ActSharedEncoderImagePolicy
+
+shape_meta: ${shape_meta}
+
+# identical to fm_dit.yaml
+obs_encoder:
+  _target_: ode_policy.utils.vision.multi_image_obs_encoder.MultiImageObsEncoder
+  shape_meta: ${shape_meta}
+  rgb_model:
+    _target_: ode_policy.utils.vision.model_getter.get_resnet
+    name: resnet18
+    weights: null
+  resize_shape: null
+  crop_shape: null
+  # constant center crop
+  random_crop: True
+  use_group_norm: True
+  share_rgb_model: False
+  imagenet_norm: True
+
+horizon: ${horizon}
+n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+n_obs_steps: ${n_obs_steps}
+
+# ─── DETR / transformer ──────────────────────────────────────────────────────
+# Width, heads and layer counts as upstream ACT, except dec_layers: upstream only reads decoder layer 0, so 1 is the
+# same model minus dead weights. dim_feedforward (3200 upstream) sets the size outside the encoder to ~24M, matched to the other methods.
+hidden_dim: 512
+dim_feedforward: 1344   # 24.07M outside obs_encoder (fm_dit 23.93M, ODE-UNet 24.40M); 3200 gives 41.2M
+nheads: 8
+enc_layers: 4
+dec_layers: 1
+dropout: 0.1
+pre_norm: false
+
+# ─── loss ────────────────────────────────────────────────────────────────────
+kl_weight: 10.0
+disable_vae: false
+
+# The task embedding is also appended to qpos for the CVAE encoder and the proprio token, as in act.yaml.
+use_task_emb: true

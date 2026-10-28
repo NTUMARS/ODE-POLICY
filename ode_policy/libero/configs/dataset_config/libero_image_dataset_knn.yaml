@@ -1,0 +1,50 @@
+# LIBERO dataset for MARS: `task_emb` obs key + per-task KNN neighbourhoods.
+#
+# knn_group_key=task_id is the load-bearing setting on a merged multi-task zarr.
+# Without it a sample's nearest neighbours come from other tasks, whose future
+# chunks differ because the TASK differs — target_spread would then be high
+# everywhere and the router would fire everywhere, which is precisely the
+# failure mode the MARS router is designed to avoid.
+_target_: ode_policy.libero.libero_dataset.LiberoImageDatasetKNN
+zarr_path: data_policy/libero_spatial_50demo.zarr
+horizon: ${horizon}
+pad_before: ${eval:'${n_obs_steps}-1'}
+pad_after: ${eval:'${n_action_steps}-1'}
+seed: 42
+val_ratio: 0.02
+batch_size: 32
+max_train_episodes: null
+
+# Eye-in-hand camera. Off by default; turn on with WRIST=1 in train_libero.sh,
+# which also adds the matching shape_meta.obs.wrist_cam entry (both are needed —
+# the dataset supplies the tensor, shape_meta makes the encoder build a backbone
+# for it). Published LIBERO baselines use both views.
+use_wrist_cam: false
+
+knn_k: 20
+n_obs_steps: ${n_obs_steps}
+n_action_steps: ${n_action_steps}
+
+# Neighbours must share a task, and come from a different demo of that task.
+knn_group_key: task_id
+knn_cross_episode_only: true
+
+# History signal: measured motion (see libero_runner.yaml for why).
+history_source: measured_delta
+
+# Neighbour key: frozen ResNet-18 features of the current frame. Image-only
+# (proprio_weight=0).
+knn_key_source: resnet
+knn_img_backbone: resnet18
+knn_resnet_layer: avgpool
+knn_resnet_pool: 3
+knn_img_gray: false
+knn_resnet_weights: IMAGENET1K_V1
+knn_proprio_weight: 0
+knn_proprio_key: state
+knn_image_mode: rgb
+knn_image_grid: 16
+knn_motion_keep: 0.5
+knn_state_current: false
+knn_state_key: state
+knn_weight_temp: null

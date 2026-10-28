@@ -1,0 +1,18 @@
+# LIBERO dataset for policies without a KNN diversity term
+# (fm_dit, a2a_dit, ddpm_dit, act, ...).
+# Adds the `task_emb` observation key on top of RobotImageDataset.
+_target_: ode_policy.libero.libero_dataset.LiberoImageDataset
+zarr_path: data_policy/libero_spatial_50demo.zarr
+horizon: ${horizon}
+pad_before: ${eval:'${n_obs_steps}-1'}
+pad_after: ${eval:'${n_action_steps}-1'}
+seed: 42
+val_ratio: 0.02
+batch_size: 32
+max_train_episodes: null
+
+# Eye-in-hand camera. Off by default; turn on with WRIST=1 in train_libero.sh,
+# which also adds the matching shape_meta.obs.wrist_cam entry (both are needed —
+# the dataset supplies the tensor, shape_meta makes the encoder build a backbone
+# for it). Published LIBERO baselines use both views.
+use_wrist_cam: false
