@@ -1,0 +1,401 @@
+diff --git a/scripts/eval_benchmark.py b/scripts/eval_benchmark.py
+index 182e105..6f3ff17 100644
+--- a/scripts/eval_benchmark.py
++++ b/scripts/eval_benchmark.py
+@@ -25,6 +25,8 @@ def main(ckpt: Path, npz_dir: Path = Path("data/npz/lafan1"), clips: list[str] |
+         print("per-step term means (max 0.02 each for the 1.0-weight terms, 0.01 for root terms):")
+         for k, v in s["terms"].items():
+             print(f"  {k:28s} {v:.4f}")
++    if "smooth" in s:
++        print("executed smoothness (step-weighted): " + "  ".join(f"{k} {v:.4g}" for k, v in s["smooth"].items()))
+     worst = sorted(results, key=lambda r: r.norm_return)[:10]
+     for r in worst:
+         print(f"  {r.name:32s} ret {r.norm_return:.3f} steps {r.steps}/{r.frames} {'FAIL@' + str(r.fail_step) if r.failed else ''}")
+diff --git a/scripts/ppo/eval_ppo.py b/scripts/ppo/eval_ppo.py
+new file mode 100644
+index 0000000..20b26aa
+--- /dev/null
++++ b/scripts/ppo/eval_ppo.py
+@@ -0,0 +1,47 @@
++"""Appendix F benchmark of PPO-Sim checkpoints written by scripts/ppo/train_ppo.py.
++
++  env -u PYTHONPATH uv run python scripts/ppo/eval_ppo.py logs/ppo_s0/ckpt_*.jit [--no-anchor-obs]
++
++Writes logs/<run>/benchmark_ckpt_XX.json in the same format as scripts/eval_benchmark.py, plus the checkpoint's
++training time and env steps (ckpt_XX.json).
++"""
++
++import json
++import sys
++from pathlib import Path
++
++import torch
++
++from supermimic.envs.mdp.motion_library import discover_npz
++from supermimic.eval.benchmark import run_benchmark, save_results, summarize
++
++
++class JitActor(torch.nn.Module):
++    """The PPO actor (observation normalizer + MLP, deterministic) on the concatenated [policy, goal] groups."""
++
++    def __init__(self, path: str, device: str):
++        super().__init__()
++        self.net = torch.jit.load(path, map_location=device)
++
++    def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor) -> torch.Tensor:
++        return self.net(torch.cat([obs_hist, goal], dim=-1))
++
++
++def main(args: list[str]) -> None:
++    anchor_obs = "--no-anchor-obs" not in args
++    files = [str(f) for f in discover_npz(Path("data/npz/lafan1"))]
++    for p in (Path(a) for a in args if not a.startswith("--")):
++        res = run_benchmark(JitActor(str(p), "cuda:0"), files, device="cuda:0", anchor_obs=anchor_obs)
++        s = summarize(res)
++        print(f"=== {p}\n{s['clips']} clips | failed {s['failed']} | mean norm return {s['mean_norm_return']:.4f}")
++        if "smooth" in s:
++            print("executed smoothness (step-weighted): " + "  ".join(f"{k} {v:.4g}" for k, v in s["smooth"].items()))
++        out = p.parent / f"benchmark_{p.stem}.json"
++        save_results(res, out)
++        d = json.loads(out.read_text())
++        d["ckpt_meta"] = json.loads(p.with_suffix(".json").read_text())
++        out.write_text(json.dumps(d, indent=1))
++
++
++if __name__ == "__main__":
++    main(sys.argv[1:])
+diff --git a/scripts/ppo/train_ppo.py b/scripts/ppo/train_ppo.py
+new file mode 100644
+index 0000000..3e75b2d
+--- /dev/null
++++ b/scripts/ppo/train_ppo.py
+@@ -0,0 +1,109 @@
++"""PPO-Sim baseline: model-free PPO on the SuperMimic tracking env (the paper's §4.1 controlled comparison).
++
++  env -u PYTHONPATH uv run python scripts/ppo/train_ppo.py --name ppo_s0 --seed 0 --hours 3
++
++Same env as sm-train (actions, observations including the anchor-relative pose unless --no-anchor-obs, rewards,
++terminations, domain randomization, adaptive clip sampling, 40 LAFAN1 clips). PPO samples its own Gaussian actions, so the env's execution noise is off.
++Hyperparameters: BeyondMimic / mjlab G1 tracking PPO, 8192 envs (the paper's PPO-Sim setting). Network sizes follow
++the paper's "same actor / critic sizes": actor MLP (2048, 1024, 512, 256), critic MLP (256, 128).
++
++Logs to logs/<name>/: tb with the same tags as sm-train (time/hours, train/episode_norm_return), and every
++--ckpt-hours a TorchScript actor ckpt_<k>.jit (deterministic, normalizer included) plus ckpt_<k>.json (hours,
++env steps) for scripts/ppo/eval_ppo.py.
++"""
++
++import argparse
++import dataclasses
++import json
++import time
++from pathlib import Path
++
++import torch
++from torch.utils.tensorboard import SummaryWriter
++
++from mjlab.rl.runner import MjlabOnPolicyRunner
++from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
++from mjlab.tasks.tracking.config.g1.rl_cfg import unitree_g1_tracking_ppo_runner_cfg
++from supermimic.envs import SuperMimicEnvCfgArgs, make_env
++from supermimic.envs.mdp.motion_library import discover_npz
++from supermimic.envs.mdp.rewards import TrackingRewardCfg
++
++ACTOR_OBS = ("policy", "goal")
++
++
++class LoggingEnv(RslRlVecEnvWrapper):
++    """Adds sm-train's training-return logging (normalized by the maximum step reward) per vectorized step."""
++
++    def __init__(self, env, writer: SummaryWriter, max_step_reward: float, log_every: int = 50):
++        super().__init__(env)
++        self.writer, self.max_r, self.log_every = writer, max_step_reward, log_every
++        self.ret = torch.zeros(self.num_envs, device=self.device)
++        self.len = torch.zeros(self.num_envs, device=self.device)
++        self.done_ret: list[float] = []
++        self.steps = 0
++        self.t0 = time.time()
++
++    def step(self, actions):
++        obs, rew, dones, extras = super().step(actions)
++        self.ret += rew
++        self.len += 1
++        if dones.any():
++            ids = dones.nonzero().squeeze(-1)
++            self.done_ret.extend((self.ret[ids] / (self.max_r * self.len[ids].clamp_min(1))).tolist())
++            self.ret[ids] = 0
++            self.len[ids] = 0
++        self.steps += 1
++        if self.steps % self.log_every == 0:
++            self.writer.add_scalar("time/hours", (time.time() - self.t0) / 3600, self.steps)
++            if self.done_ret:
++                self.writer.add_scalar("train/episode_norm_return", sum(self.done_ret) / len(self.done_ret), self.steps)
++                self.done_ret = []
++        return obs, rew, dones, extras
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--name", required=True)
++    p.add_argument("--seed", type=int, default=0)
++    p.add_argument("--hours", type=float, default=3.0)
++    p.add_argument("--ckpt-hours", type=float, default=0.35)
++    p.add_argument("--num-envs", type=int, default=8192)
++    p.add_argument("--npz-dir", default="data/npz/lafan1")
++    p.add_argument("--no-anchor-obs", action="store_true", help="drop the anchor-relative observation (on by default)")
++    a = p.parse_args()
++    out = Path("logs") / a.name
++    out.mkdir(parents=True, exist_ok=True)
++    torch.manual_seed(a.seed)
++    files = [str(f) for f in discover_npz(Path(a.npz_dir))]
++    env = make_env(SuperMimicEnvCfgArgs(npz_files=files, num_envs=a.num_envs, action_noise_std=0.0, record_transitions=False,
++                                        anchor_obs=not a.no_anchor_obs, seed=a.seed), device="cuda:0")
++    writer = SummaryWriter(str(out / "tb"))
++    venv = LoggingEnv(env, writer, TrackingRewardCfg().max_step_reward)
++
++    cfg = unitree_g1_tracking_ppo_runner_cfg()
++    cfg.seed = a.seed
++    cfg.obs_groups = {"actor": ACTOR_OBS, "critic": ACTOR_OBS}
++    cfg.actor = dataclasses.replace(cfg.actor, hidden_dims=(2048, 1024, 512, 256))
++    cfg.critic = dataclasses.replace(cfg.critic, hidden_dims=(256, 128))
++    cfg.logger = "tensorboard"
++    cfg.save_interval = 10**9  # checkpoints are written here, on a wall-clock schedule
++    train_cfg = dataclasses.asdict(cfg)
++    runner = MjlabOnPolicyRunner(venv, train_cfg, log_dir=str(out / "rsl_rl"), device="cuda:0")
++    (out / "config.json").write_text(json.dumps({"args": vars(a), "runner": train_cfg}, indent=1, default=str))
++
++    t0, k, first = time.time(), 1, True
++    while (time.time() - t0) / 3600 < a.hours:
++        runner.learn(num_learning_iterations=20, init_at_random_ep_len=first)
++        first = False
++        hrs = (time.time() - t0) / 3600
++        if hrs >= k * a.ckpt_hours or hrs >= a.hours:
++            runner.export_policy_to_jit(str(out), f"ckpt_{k:02d}.jit")
++            (out / f"ckpt_{k:02d}.json").write_text(json.dumps({"hours": hrs, "env_steps": venv.steps * a.num_envs,
++                                                                "iteration": runner.current_learning_iteration}))
++            print(f"[ckpt] {k:02d} at {hrs:.2f} h, {venv.steps} vectorized steps", flush=True)
++            k += 1
++    writer.flush()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/supermimic/eval/benchmark.py b/src/supermimic/eval/benchmark.py
+index 7d6f3a9..f64c5d9 100644
+--- a/src/supermimic/eval/benchmark.py
++++ b/src/supermimic/eval/benchmark.py
+@@ -18,6 +18,12 @@ import torch
+ from supermimic.envs import SuperMimicEnvCfgArgs, make_env
+ from supermimic.policy.nets import Policy, PolicyCfg
+ 
++# Smoothness of the executed trajectory, per-step means over consecutive steps of a clip, averaged over joints:
++# action_rate = (a_t - a_{t-1})^2 and action_acc = (a_t - 2 a_{t-1} + a_{t-2})^2 in action units,
++# joint_acc = |qd_t - qd_{t-1}| / dt [rad/s^2] and joint_jerk = |qd_t - 2 qd_{t-1} + qd_{t-2}| / dt^2 [rad/s^3]
++# from the measured joint velocities at the control rate.
++SMOOTH_KEYS = ("action_rate", "action_acc", "joint_acc", "joint_jerk")
++
+ 
+ @dataclass
+ class ClipResult:
+@@ -28,6 +34,7 @@ class ClipResult:
+     failed: bool
+     fail_step: int  # -1 if not failed
+     terms: dict | None = None  # per-term mean reward per step (dt-scaled)
++    smooth: dict | None = None  # executed-trajectory smoothness, see SMOOTH_KEYS
+ 
+ 
+ def load_policy_from_checkpoint(path: str | Path, device: str) -> tuple[Policy, dict]:
+@@ -77,13 +84,29 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0",
+         term_sum = torch.zeros(num_envs, len(term_names), device=device)
+         results: dict[int, ClipResult] = {}
+         remaining = n_clips
++        robot = env.scene["robot"]
++        dt = env.step_dt
++        a_hist = v_hist = None  # last three actions / joint velocities
++        sm_sum = torch.zeros(num_envs, len(SMOOTH_KEYS), device=device)
++        sm_cnt = torch.zeros(num_envs, 2, device=device)  # steps with one / two predecessors in the clip
+         while remaining > 0:
+             act = policy(obs["policy"], obs["goal"])
+             obs, rew, term, tout, _ = env.step(act)
+             ret_sum += rew
+             term_sum += env.reward_manager.term_rewards
+-            steps += 1
++            v = robot.data.joint_vel.clone()
++            a_hist = act[None].repeat(3, 1, 1) if a_hist is None else torch.cat([a_hist[1:], act[None]])
++            v_hist = v[None].repeat(3, 1, 1) if v_hist is None else torch.cat([v_hist[1:], v[None]])
+             done = (term | tout) & active
++            # the step that ends a clip auto-resets the env, so its measured velocity belongs to the next clip
++            ok1, ok2 = ((steps >= 1) & ~done).float(), ((steps >= 2) & ~done).float()
++            sm_sum[:, 0] += ok1 * (a_hist[2] - a_hist[1]).pow(2).mean(-1)
++            sm_sum[:, 1] += ok2 * (a_hist[2] - 2 * a_hist[1] + a_hist[0]).pow(2).mean(-1)
++            sm_sum[:, 2] += ok1 * ((v_hist[2] - v_hist[1]).abs() / dt).mean(-1)
++            sm_sum[:, 3] += ok2 * ((v_hist[2] - 2 * v_hist[1] + v_hist[0]).abs() / dt**2).mean(-1)
++            sm_cnt[:, 0] += ok1
++            sm_cnt[:, 1] += ok2
++            steps += 1
+             if done.any():
+                 ids = done.nonzero().squeeze(-1)
+                 for e in ids.tolist():
+@@ -98,6 +121,7 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0",
+                             failed=bool(term[e]),
+                             fail_step=st if bool(term[e]) else -1,
+                             terms={n: float(term_sum[e, i]) / max(st, 1) for i, n in enumerate(term_names)},
++                            smooth={k: float(sm_sum[e, i]) / max(float(sm_cnt[e, i % 2]), 1.0) for i, k in enumerate(SMOOTH_KEYS)},
+                         )
+                         remaining -= 1
+                         if verbose and (len(results) % 50 == 0 or len(results) == n_clips):
+@@ -110,6 +134,8 @@ def run_benchmark(policy: Policy, npz_files: list[str], device: str = "cuda:0",
+                 cmd.forced_frame[ids] = lib.clip_start[torch.clamp(nxt[ids], max=n_clips - 1)]
+                 ret_sum[ids] = 0.0
+                 term_sum[ids] = 0.0
++                sm_sum[ids] = 0.0
++                sm_cnt[ids] = 0.0
+                 steps[ids] = 0
+         return [results[i] for i in range(n_clips)]
+     finally:
+@@ -126,6 +152,8 @@ def summarize(results: list[ClipResult]) -> dict:
+     out = {"clips": n, "failed": failed, "mean_norm_return": mean_ret, "step_weighted_norm_return": w_ret}
+     if results and results[0].terms:
+         out["terms"] = {k: sum(r.terms[k] * r.steps for r in results) / max(tot_steps, 1) for k in results[0].terms}
++    if results and results[0].smooth:
++        out["smooth"] = {k: sum(r.smooth[k] * r.steps for r in results) / max(tot_steps, 1) for k in results[0].smooth}
+     return out
+ 
+ 
+diff --git a/src/supermimic/imagination/policy_trainer.py b/src/supermimic/imagination/policy_trainer.py
+index b4bdb04..346edb3 100644
+--- a/src/supermimic/imagination/policy_trainer.py
++++ b/src/supermimic/imagination/policy_trainer.py
+@@ -65,7 +65,8 @@ class PolicyTrainer:
+         # ---- actor: BPTT through the frozen world model ------------------------------------
+         self.wm.requires_grad_(False)
+         self.critic.requires_grad_(False)
+-        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs)
++        probe: dict = {}
++        ro = imagine(self.wm, self.policy, self.lib, start, cfg.horizon, cfg.future_frames, obs_noise=cfg.obs_noise, step_fn=self.step_fn, anchor_obs=cfg.anchor_obs, grad_probe=probe)
+         feat, goals, e_root = self._critic_inputs(ro)
+         if cfg.use_critic:
+             v_H = self.critic(feat[-1], goals[-1], xi_norm, e_root[-1])
+@@ -90,7 +91,14 @@ class PolicyTrainer:
+             "imag_dhat_mean": float(ro.dhat[1:].mean().detach()),
+             "policy_grad_norm": float(gn),
+             "action_abs_mean": float(ro.actions.abs().mean().detach()),
++            "imag_action_rate": float((ro.actions[1:] - ro.actions[:-1]).pow(2).sum(-1).mean().detach()),
+         }
++        if len(probe) == cfg.horizon:
++            # how much of the objective's gradient reaches the first imagined action relative to the last one
++            g = torch.stack([probe[t] for t in range(cfg.horizon)])
++            metrics["dJda_first"] = float(g[0])
++            metrics["dJda_last"] = float(g[-1])
++            metrics["dJda_log_first_over_last"] = float(torch.log10(g[0] / g[-1].clamp_min(1e-12)))
+         for k, v in ro.reward_terms.items():
+             metrics[f"imag_r/{k}"] = v
+ 
+diff --git a/src/supermimic/imagination/rollout.py b/src/supermimic/imagination/rollout.py
+index 6316fa3..e7045d4 100644
+--- a/src/supermimic/imagination/rollout.py
++++ b/src/supermimic/imagination/rollout.py
+@@ -42,6 +42,7 @@ def imagine(
+     obs_noise: bool = True,
+     step_fn: ImagStep | None = None,
+     anchor_obs: bool = False,
++    grad_probe: dict | None = None,
+ ) -> ImagRollout:
+     device = start.state.device
+     n = start.state.shape[0]
+@@ -98,6 +99,9 @@ def imagine(
+     for t in range(horizon):
+         obs_flat = flatten_history_term_major(torch.stack(hist, 0))
+         a = policy(obs_flat, goals[-1])
++        if grad_probe is not None and a.requires_grad:
++            # diagnostic: mean per-env |dJ/da_t| of the BPTT objective, filled in by the backward pass
++            a.register_hook(lambda g, t=t: grad_probe.__setitem__(t, g.norm(dim=-1).mean().detach()))
+         s_next, r, term_vec, logits, obs_clean, anchor_pose = step_fn(s, a, a_prev, start.xi, ref)
+         d = torch.sigmoid(logits)
+         c = c * (1.0 - d)
+diff --git a/src/supermimic/policy/nets.py b/src/supermimic/policy/nets.py
+index 0b60533..3a436c8 100644
+--- a/src/supermimic/policy/nets.py
++++ b/src/supermimic/policy/nets.py
+@@ -27,6 +27,12 @@ class PolicyCfg:
+     goal_term_scale: tuple[float, ...] = (1.0, 5.0, 1.0, 2.0, 1.0, 1.0)
+     decoder_last_gain: float = 0.01
+     goal_dim: int = GOAL_DIM  # 680 (+9 with anchor_obs)
++    # "mlp": the decoder outputs the action (the paper's policy).
++    # "ode": the decoder outputs the action's change per control step, integrated with one Euler step from the
++    # previous clean action: a_t = clip_amax(a_{t-1} + clip_dmax(dec(z, o_hist))).
++    actor: str = "mlp"
++    ode_dmax: float | None = None  # "ode": bound on |a_t - a_{t-1}| per joint (same for all joints)
++    ode_amax: tuple[float, ...] | None = None  # "ode": bound on |a_t|, one value or one per joint
+ 
+ 
+ @dataclass
+@@ -74,12 +80,25 @@ class Policy(nn.Module):
+ 
+     def __init__(self, cfg: PolicyCfg):
+         super().__init__()
++        assert cfg.actor in ("mlp", "ode"), cfg.actor
+         self.cfg = cfg
+         self.encoders = nn.ModuleDict({"motion": MotionEncoder(cfg)})
+         self.decoder = Decoder(cfg)
+ 
+     def forward(self, obs_hist: torch.Tensor, goal: torch.Tensor, interface: str = "motion") -> torch.Tensor:
+-        return self.decoder(self.encoders[interface](goal), obs_hist)
++        out = self.decoder(self.encoders[interface](goal), obs_hist)
++        if self.cfg.actor == "mlp":
++            return out
++        # The history is term-major with the action term last (oldest -> newest), so its last ACT_DIM entries are
++        # a_{t-1}: the clean policy output (execution noise is added only on the simulator side).
++        a_prev = obs_hist[..., -ACT_DIM:]
++        if self.cfg.ode_dmax is not None:
++            out = out.clamp(-self.cfg.ode_dmax, self.cfg.ode_dmax)
++        a = a_prev + out
++        if self.cfg.ode_amax is not None:
++            amax = a.new_tensor(self.cfg.ode_amax)
++            a = torch.maximum(torch.minimum(a, amax), -amax)
++        return a
+ 
+ 
+ class Critic(nn.Module):
+diff --git a/tests/test_ode_policy.py b/tests/test_ode_policy.py
+new file mode 100644
+index 0000000..113be0d
+--- /dev/null
++++ b/tests/test_ode_policy.py
+@@ -0,0 +1,37 @@
++"""ODE actor: one Euler step from the previous clean action, read from the newest frame of the history."""
++
++import torch
++
++from supermimic.policy.nets import ACT_DIM, GOAL_DIM, Policy, PolicyCfg
++from supermimic.world_model.heads import OBS_DIM, flatten_history_term_major
++
++
++def _inputs(n=5, h=10):
++    torch.manual_seed(0)
++    hist = torch.randn(h, n, OBS_DIM)  # (H, N, 93) oldest -> newest; the action term is the last ACT_DIM of each frame
++    return hist, flatten_history_term_major(hist), torch.randn(n, GOAL_DIM)
++
++
++def test_ode_actor_steps_from_newest_previous_action():
++    hist, obs_flat, goal = _inputs()
++    mlp = Policy(PolicyCfg())
++    ode = Policy(PolicyCfg(actor="ode"))
++    ode.load_state_dict(mlp.state_dict())  # same parameters, only the output is interpreted differently
++    a_prev = hist[-1, :, OBS_DIM - ACT_DIM :]
++    assert torch.allclose(obs_flat[:, -ACT_DIM:], a_prev)
++    assert torch.allclose(ode(obs_flat, goal), a_prev + mlp(obs_flat, goal), atol=1e-6)
++    # small last-layer gain: the initial ODE policy nearly holds the previous action
++    assert (ode(obs_flat, goal) - a_prev).abs().max() < 0.5
++
++
++def test_ode_actor_clamps():
++    hist, obs_flat, goal = _inputs()
++    hist[-1, :, OBS_DIM - ACT_DIM :] = 3.0  # previous action outside the bound below
++    obs_flat = flatten_history_term_major(hist)
++    pol = Policy(PolicyCfg(actor="ode", ode_dmax=0.01, ode_amax=(2.0,) * ACT_DIM))
++    torch.nn.init.constant_(pol.decoder.mlp.net[-1].bias, 1.0)  # large raw change, clamped to dmax
++    a = pol(obs_flat, goal)
++    assert torch.allclose(a, torch.full_like(a, 2.0))
++    pol = Policy(PolicyCfg(actor="ode", ode_dmax=0.01))
++    torch.nn.init.constant_(pol.decoder.mlp.net[-1].bias, 1.0)
++    assert ((pol(obs_flat, goal) - 3.0).abs() <= 0.01 + 1e-6).all()

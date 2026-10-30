@@ -43,6 +43,7 @@ plain ODE.
 | `main` | ODE policy, the imitation-learning baselines of the paper, LIBERO (+ LIBERO-plus) training / evaluation, the 2D multimodal navigation task |
 | `real-r1lite` | Real-robot code for the Galaxea R1 Lite (two arms, joint space): data conversion, training, deployment |
 | `vla-pi05` | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert |
+| `rl-supermimic` | ODE policy as the actor of SuperMimic (world-model RL, Unitree G1 whole-body motion tracking on LAFAN1), with the PPO-Sim baseline: [rl/supermimic_ode/](rl/supermimic_ode/README.md) |
 
 Methods on `main` (`<policy>` names for the scripts below):
 
