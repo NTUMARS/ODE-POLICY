@@ -1,8 +1,8 @@
-# Ordinary Differential Equation Policy
+# ODE Policy: Robot Learning via Action Dynamics, Not Actions
 
 *Natura non facit saltus. Actions should not jump either.*
 
-[Project page](https://jiajindou.com/ODE/) · Paper (coming soon)
+[Project page](https://ntumars.github.io/ODE/) · [Paper (arXiv:2611.01729)](https://arxiv.org/abs/2611.01729)
 
 A direct-action policy predicts each action chunk independently, so the motion jumps where
 chunks meet. **ODE policy** replaces only the action head: it learns how the action changes
@@ -169,10 +169,11 @@ docs/                                  # reproduction guide, porting guide, meth
 
 ```bibtex
 @article{jia2026ode,
-  title   = {Ordinary Differential Equation Policy},
-  author  = {Jia, Jindou and others and Yang, Jianfei},
-  year    = {2026},
-  note    = {Under review}
+  title   = {{ODE} Policy: Robot Learning via Action Dynamics, Not Actions},
+  author  = {Jia, Jindou and Li, Jingliang and Zuo, Kuangji and An, Tuo and Hu, Yuxuan and Zhao, Mengfei
+             and Lyu, Bofan and Bai, Jiaqi and Zhu, Daoyuan and Dai, Hengyu and Zhang, Junpeng and Yang, Jianfei},
+  journal = {arXiv preprint arXiv:2611.01729},
+  year    = {2026}
 }
 ```
 
