@@ -22,8 +22,9 @@ and integrates it, so every action follows from the previous one.
 
 **One decision (every H = 8 control steps).**
 1. Read the observation once and encode the condition `c`; `c` and `s` stay fixed for the chunk.
-2. Integrate the field with RK4 for 8 steps, starting from the last integrated action (not
-   the measured pose), so consecutive chunks join without a jump.
+2. Integrate the field with Euler for 8 steps (one field call per step), starting from the last
+   integrated action (not the measured pose), so consecutive chunks join without a jump. The
+   paper used RK4; RK4, RK2 and Euler learn about equally well.
 3. Track the 8 integrated references with the robot's controller.
 
 **Training.** Integrate the field from the demonstrated action for 8 steps and match the
@@ -48,8 +49,8 @@ Methods on `main` (`<policy>` names for the scripts below):
 
 | Policy | Name | Action head |
 |---|---|---|
-| **ODE-MLP** (ours) | `ode` | velocity field = FiLM residual MLP, integrated with RK4 |
-| **ODE-DiT** (ours) | `ode_dit` | velocity field = adaLN DiT blocks, integrated with RK4 |
+| **ODE-MLP** (ours) | `ode` | velocity field = FiLM residual MLP, integrated with Euler |
+| **ODE-DiT** (ours) | `ode_dit` | velocity field = adaLN DiT blocks, integrated with Euler |
 | FM-DiT | `fm_dit` | conditional flow matching, DiT |
 | FM-UNet | `fm_unet` | conditional flow matching, 1D UNet |
 | A2A-DiT | `a2a_dit` | flow from the action history, DiT |
@@ -119,7 +120,8 @@ bash scripts/train_libero.sh ode libero_4suite train_config.training_params.chec
 
 Checkpoints are written to `il_outputs/<policy>/libero_4suite/checkpoints/<epoch>.ckpt`.
 The configuration in [`ode.yaml`](ode_policy/configs/policy_config/ode.yaml) is the one used in
-the paper; no overrides are needed.
+the paper except the solver, which defaults to Euler; add `policy_config.solver=rk4` to reproduce
+the paper's runs exactly.
 
 **Evaluate** on the four suites (10 tasks × 20 episodes each, LIBERO's fixed initial states):
 
