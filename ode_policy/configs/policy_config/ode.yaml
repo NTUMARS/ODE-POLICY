@@ -1,6 +1,7 @@
 # ODE policy (ODE-MLP), da/dt = f(c, s, a). Needs the pose zarr from
 # ode_policy/libero/build_ode_zarr.py (action = [pose(6), gripper(1)]).
-# The defaults below are the configuration used for every result in the paper.
+# The defaults below are the configuration used for every result in the paper, except the
+# solver: the paper used rk4 (policy_config.solver=rk4 reproduces it exactly).
 _target_: ode_policy.policies.ode.ode_image_policy.ODEImagePolicy
 
 shape_meta: ${shape_meta}
@@ -29,7 +30,7 @@ obs_as_global_cond: ${obs_as_global_cond}
 hidden_dim: 1732
 num_layers: 4
 cond_dim: 512
-solver: rk4          # rk4 (4 field calls per step) | rk2 (midpoint, 2) | euler (1)
+solver: euler        # euler (1 field call per step) | rk2 (midpoint, 2) | rk4 (4, the paper)
 substeps: 1
 vel_scale: 0.05
 # start perturbation: half the samples start ~1 cm / 0.03 rad off the demo and must return
