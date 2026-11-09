@@ -9,7 +9,7 @@ field integrates to, starting from where the previous chunk ended.
 Training never regresses f against a velocity label -- differencing the demo would hand
 it the demo's jitter. It integrates f from the current pose over the next n_action_steps
 control steps and matches the PATH against the demonstrated one (Chen et al. 2018). The
-solver is a fixed-step RK4 (or RK2 / Euler) backpropagated through directly rather than
+solver is a fixed-step Euler (or RK2 / RK4) backpropagated through directly rather than
 the adjoint: f is a small head on a per-chunk condition, so the unrolled graph is a few
 MB, and plain backprop gives the exact gradient where the adjoint re-integrates backwards
 and adds its own error. c and s are held fixed over the chunk, as at execution.
@@ -171,7 +171,7 @@ class ODEImagePolicy(BaseImagePolicy):
         hidden_dim=512,
         num_layers=4,
         cond_dim=512,
-        solver="rk4",
+        solver="euler",
         substeps=1,
         # f's raw output is multiplied by this, in normalised pose units per control
         # step. The demo moves ~0.01-0.05 normalised units per step, so this keeps the

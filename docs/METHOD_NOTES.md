@@ -39,7 +39,7 @@ after ~10 epochs the policies with and without it perform the same.
 
 **Supervise the path, not the velocity.** Differencing demonstrations for velocity labels
 inherits their step-to-step jitter. Integrating and matching the 8-step path needs no labels,
-and backpropagating through RK4 directly is cheap (the field is a small head on a per-chunk
+and backpropagating through the solver directly is cheap (the field is a small head on a per-chunk
 condition), so the adjoint method is unnecessary.
 
 **Train on the same chunk length you execute.** Training with 16-step integrations and
@@ -64,7 +64,7 @@ executing 8 steps was much worse than training and executing 8.
 - The architecture of the field: a FiLM MLP, a transformer and adaLN DiT blocks perform about the
   same at equal size; the MLP trains several times faster.
 - The integrator: RK4, RK2 and Euler learn about equally well. Euler is the fastest at inference
-  (one field call per step).
+  (one field call per step), so it is the default; the paper's runs used RK4.
 - Finer integration at inference (`--substeps`, or a higher control rate with `--rate`) without
   retraining changes success by only one or two points: the learned field behaves as a
   continuous-time model.
