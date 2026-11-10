@@ -37,9 +37,9 @@
 | Branch | Setting | Contents | Status |
 | --- | --- | --- | --- |
 | [`main`](https://github.com/NTUMARS/ODE-POLICY/tree/main) | 🖥️ Sim | ODE policy and the imitation-learning baselines of the paper, LIBERO and LIBERO-plus training and evaluation, the 2D multimodal navigation task. | ✅ available |
-| [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) | 🦾 Real | Galaxea R1 Lite, two arms in joint space: data conversion, training and deployment. | ✅ available |
-| [`vla-pi05`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05) | 🧠 VLA | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert. | ✅ available |
-| [`rl-supermimic`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic) | 🏃 RL | ODE policy as the actor of SuperMimic (world-model RL, Unitree G1 whole-body motion tracking on LAFAN1), with the PPO baseline. | ✅ available |
+| [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) | 🦾 Real | Galaxea R1 Lite, one or two arms in joint space: data conversion, multi-GPU training and a deployment server. Guide: [`ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real). | ✅ available |
+| [`vla-pi05`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05) | 🧠 VLA | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert. Guide: [`vla/pi05_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05/vla/pi05_ode). | ✅ available |
+| [`rl-supermimic`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic) | 🏃 RL | ODE policy as the actor of SuperMimic (world-model RL, Unitree G1 whole-body motion tracking on LAFAN1), with the PPO baseline. Guide: [`rl/supermimic_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic/rl/supermimic_ode). | ✅ available |
 
 ---
 
@@ -77,9 +77,9 @@ Against 14 baselines, in simulation and on four real robots:
 | Check the installation in minutes | [Quick start: 2D navigation](#-quick-start-2d-navigation-minutes) |
 | Train and evaluate on LIBERO | [LIBERO](#-libero) |
 | Reproduce the paper's simulation experiments | [docs/REPRODUCE.md](docs/REPRODUCE.md) |
-| Run ODE policy on a Galaxea R1 Lite | [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) |
-| Put an ODE head on the π0.5 VLA | [`vla-pi05`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05) |
-| Use ODE policy as an RL actor | [`rl-supermimic`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic) |
+| Run ODE policy on a Galaxea R1 Lite | [`real-r1lite`: `ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real) |
+| Put an ODE head on the π0.5 VLA | [`vla-pi05`: `vla/pi05_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05/vla/pi05_ode) |
+| Use ODE policy as an RL actor | [`rl-supermimic`: `rl/supermimic_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic/rl/supermimic_ode) |
 | Bring ODE policy to my own robot or dataset | [docs/PORTING.md](docs/PORTING.md) |
 | Read what worked and what did not | [docs/METHOD_NOTES.md](docs/METHOD_NOTES.md) |
 
