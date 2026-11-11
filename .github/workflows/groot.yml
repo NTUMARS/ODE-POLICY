@@ -1,0 +1,83 @@
+name: GR00T G1 CPU checks
+
+on:
+  push:
+    paths:
+      - "groot/**"
+      - "docs/deploy_groot/**"
+      - "scripts/check_public_integrations.py"
+      - "tests/test_public_integration_check.py"
+      - "tests/requirements-groot.txt"
+      - ".github/workflows/groot.yml"
+  pull_request:
+    paths:
+      - "groot/**"
+      - "docs/deploy_groot/**"
+      - "scripts/check_public_integrations.py"
+      - "tests/test_public_integration_check.py"
+      - "tests/requirements-groot.txt"
+      - ".github/workflows/groot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r tests/requirements-groot.txt
+          python -m pip install -e groot --no-deps
+      - name: Check public source
+        run: |
+          python scripts/check_public_integrations.py
+          python -m ruff check groot scripts/check_public_integrations.py tests/test_public_integration_check.py --select F
+          python -m pytest tests/test_public_integration_check.py -q
+      - name: Test package on CPU
+        run: |
+          python -m pytest groot/tests -q --junitxml=cpu-tests.xml
+          python - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          suites = ET.parse("cpu-tests.xml").getroot().iter("testsuite")
+          assert sum(int(suite.get("skipped", 0)) for suite in suites) == 0, "CPU checks must not skip tests"
+          PYTEST
+      - name: Build package distributions
+        run: python -m build --no-isolation groot
+      - name: Check packaged configuration, licenses and source-only contents
+        run: |
+          python - <<'PYBUILD'
+          from pathlib import Path
+          import runpy, tarfile, zipfile
+          rules = runpy.run_path("scripts/check_public_integrations.py")
+          artifacts = sorted(Path("groot/dist").iterdir())
+          assert len(artifacts) == 2, artifacts
+          for artifact in artifacts:
+              if artifact.suffix == ".whl":
+                  with zipfile.ZipFile(artifact) as archive:
+                      names = archive.namelist()
+              else:
+                  with tarfile.open(artifact) as archive:
+                      names = archive.getnames()
+              for name in names:
+                  path = Path(name)
+                  assert path.suffix.lower() not in rules["EXCLUDED_ASSETS"], name
+                  assert not any(part in rules["GENERATED_PARTS"] or part.startswith(".venv-")
+                                 for part in path.parts), name
+              for required in ['/configs/g1.yaml', '/THIRD_PARTY_NOTICES.md', '/LICENSE-APACHE-2.0']:
+                  assert any(name.endswith(required) for name in names), (artifact, required)
+          PYBUILD

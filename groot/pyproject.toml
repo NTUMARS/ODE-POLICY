@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ode-policy-g1"
+version = "0.1.0"
+description = "Portable single-query GR00T and SONIC latent ODE integration for G1"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE-APACHE-2.0", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.10"
+dependencies = ["torch>=2.6", "numpy>=1.24,<2", "safetensors>=0.4", "PyYAML>=6"]
+
+[project.optional-dependencies]
+data = ["pyarrow>=14"]
+vision = ["Pillow>=10", "torchcodec>=0.4"]
+robot = ["pyzmq>=25", "msgpack-numpy>=0.4.8", "Pillow>=10"]
+test = ["pytest>=8", "Pillow>=10", "pyarrow>=14"]
+
+[project.scripts]
+ode-g1 = "ode_g1.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ode_g1 = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

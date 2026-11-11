@@ -1,0 +1,72 @@
+# Relative paths resolve against THIS file, not the working directory.
+# Copy this file to your workspace and set your own data/model locations.
+device: cuda
+paths:
+  dataset_root: ../data/task
+  prepared: ../runs/task/prepared
+  feature_cache: ../runs/task/features
+  output: ../runs/task/train
+dataset:
+  name: custom-task
+  repo_id: local
+  # Null means infer the single task instruction/counts and content identity.
+  instruction: null
+  revision: null
+  expected_episodes: null
+  expected_frames: null
+  camera_keys: [observation.images.ego_view, observation.images.chest]
+base_model:
+  path: null  # e.g. /your/models/GR00T-N1.7-3B or nvidia/GR00T-N1.7-3B
+  revision: 2fc962b973bccdd5d8ce4f67cc63b264d6886495
+  cosmos_revision: 9ce19a195e423419c349abfc86fd07178b230561
+  cosmos_path: null  # Optional explicit local Cosmos snapshot; otherwise resolve its pinned HF cache.
+  allow_download: false
+  channels_last_3d: true
+head:
+  horizon: 16
+  body_dim: 64
+  hand_dim: 12
+  state_dim: 44
+  feature_dim: 1024
+  cond_dim: 512
+  width: 512
+  layers: 4
+  field_scale: 1.0
+features:
+  batch_size: 16
+  max_ram_frames: 32
+  disk_reserve_gb: 0
+  require_cache_hits: true
+training:
+  epochs: 90
+  batch_size: 112
+  learning_rate: 1.0e-5
+  weight_decay: 1.0e-5
+  warmup_ratio: 0.02
+  min_lr_ratio: 0.1
+  max_grad_norm: 1.0
+  seed: 17
+  log_every_steps: 10
+  checkpoint_every_epochs: 5
+  checkpoint_milestone_epochs: [60, 70, 80, 90]
+  autocast_bfloat16: true
+  max_train_seconds: null
+  resume: null
+inference:
+  checkpoint_dir: null  # Null uses paths.output
+  verify_head_sha256: false
+deployment:
+  command_endpoint: null  # tcp://host:port; this process binds the SONIC input channel
+  state_endpoint: null    # tcp://host:port; controller publishes body feedback here
+  camera_host: null
+  camera_port: 60000
+  camera_sources: [head, chest] # Same order as dataset.camera_keys
+  network_interface: null # DDS interface connected to the robot
+  dds_domain: 0
+  head_source: full       # full, left or right; match training camera framing
+  chest_rotate180: true
+  max_sensor_age_s: 0.25
+  max_camera_skew_s: 0.1
+  hand_speed: 2.0         # DFX opening fraction per second
+  initialization_s: 3.0
+  max_inference_s: 0.5
