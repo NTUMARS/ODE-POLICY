@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ode-imagewam"
+version = "0.1.0"
+description = "ImageWAM ODE training and LIBERO evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0 AND MIT"
+license-files = ["LICENSE", "LICENSE.MIT", "THIRD_PARTY_NOTICES.md"]
+dependencies = ["torch>=2.7,<3", "numpy>=1.26,<2", "PyYAML>=6", "omegaconf>=2.3", "pillow>=10"]
+
+[project.optional-dependencies]
+data = ["pyarrow>=17", "av==16.0.1", "torchvision>=0.22,<0.25"]
+train = ["accelerate==1.12.0", "hydra-core>=1.3,<2", "transformers==4.56.1", "safetensors>=0.4.5", "einops>=0.8"]
+distributed = ["deepspeed==0.18.5"]
+test = ["pytest>=8", "scipy>=1.11", "pyarrow>=17", "av==16.0.1", "torchvision>=0.22,<0.25", "accelerate==1.12.0", "hydra-core>=1.3,<2", "einops>=0.8", "safetensors>=0.4.5"]
+
+[project.scripts]
+ode-imagewam = "ode_imagewam.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ode_imagewam = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

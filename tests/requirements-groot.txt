@@ -1,0 +1,13 @@
+# CPU checks for the GR00T G1 package.
+numpy==1.26.4
+PyYAML>=6,<7
+pytest>=8,<10
+safetensors>=0.4.5
+Pillow>=10
+pyarrow==23.0.1
+build>=1.2
+setuptools>=77
+wheel
+ruff>=0.17,<0.18
+pyzmq>=25
+msgpack-numpy>=0.4.8
