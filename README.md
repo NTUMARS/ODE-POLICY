@@ -39,7 +39,7 @@
 | Code / branch | Setting | Contents | Status |
 | --- | --- | --- | --- |
 | [`main`](https://github.com/NTUMARS/ODE-POLICY/tree/main) | 🖥️ Sim | ODE policy and imitation-learning baselines, LIBERO and LIBERO-plus training and evaluation, and 2D navigation. | ✅ available |
-| [`wam/`](wam/) | 🖥️ Sim | ImageWAM ODE full training and evaluation on standard LIBERO and LIBERO Plus. Guide: [WAM](docs/wam_libero/README.md). | ✅ available |
+| [`wam/`](wam/) | 🧠 WAM (Sim) | ImageWAM ODE full training and evaluation on standard LIBERO and LIBERO Plus. Guide: [WAM](docs/wam_libero/README.md). | ✅ available |
 | [`groot/`](groot/) | 🦾 Real | GR00T ODE training and Unitree G1 deployment, with SONIC whole-body control and direct dexterous-hand control. Guide: [GR00T G1](docs/deploy_groot/README.md). | ✅ available |
 | [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) | 🦾 Real | Galaxea R1 Lite, one or two arms in joint space: data conversion, multi-GPU training and a deployment server. Guide: [`ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real). | ✅ available |
 | [`vla-pi05`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05) | 🧠 VLA | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert. Guide: [`vla/pi05_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05/vla/pi05_ode). | ✅ available |
