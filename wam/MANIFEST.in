@@ -1,0 +1,17 @@
+include README.md THIRD_PARTY_NOTICES.md LICENSE LICENSE.MIT
+recursive-include src/ode_imagewam/configs *.yaml
+prune build
+prune dist
+prune .venv*
+prune venv
+prune .pytest_cache
+prune .ruff_cache
+prune cache
+prune checkpoints
+prune data
+prune datasets
+prune runs
+prune outputs
+prune wandb
+global-exclude *.pyc *.pyo *.pyd .DS_Store .env .env.* *.local.yaml *.local.yml *.local.json
+global-exclude *.safetensors *.pt *.pth *.ckpt *.onnx *.npz *.npy *.parquet *.arrow *.mp4 *.avi

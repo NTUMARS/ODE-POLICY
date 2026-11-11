@@ -21,6 +21,9 @@
   <img src="docs/assets/teaser.jpg" alt="ODE policy across embodiments and models" width="100%">
 </p>
 
+> [!NOTE]
+> **You are on the `wam-imagewam` branch**, which adds ImageWAM ODE training and LIBERO / LIBERO Plus evaluation. Start with its guide, [`docs/wam_libero/README.md`](docs/wam_libero/README.md). The branch also contains the code of `main`, so everything below applies here as well.
+
 ## 📰 News
 
 - **[2026-11-09]** ⚡ **The ODE policy now defaults to the *Euler* solver**, which learns about as well as RK4 and
@@ -33,14 +36,16 @@
 ## 🌿 Branches
 
 > [!IMPORTANT]
-> **`main` holds the ODE policy, the baselines and the simulation benchmarks.** The real-robot, VLA and RL code lives
+> **`main` holds the ODE policy, the baselines and the simulation benchmarks.** The WAM, real-robot, VLA and RL code lives
 > on its own branch, each self-contained with its own setup and usage guide.
 
 | Branch | Setting | Contents | Status |
 | --- | --- | --- | --- |
 | [`main`](https://github.com/NTUMARS/ODE-POLICY/tree/main) | 🖥️ Sim | ODE policy and the imitation-learning baselines of the paper, LIBERO and LIBERO-plus training and evaluation, the 2D multimodal navigation task. | ✅ available |
 | [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) | 🦾 Real | Galaxea R1 Lite, one or two arms in joint space: data conversion, multi-GPU training and a deployment server. Guide: [`ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real). | ✅ available |
+| [`real-g1`](https://github.com/NTUMARS/ODE-POLICY/tree/real-g1) | 🦾 Real | GR00T ODE training and native Unitree G1 deployment, with SONIC whole-body control and direct dexterous-hand control. Guide: [`docs/deploy_groot/README.md`](https://github.com/NTUMARS/ODE-POLICY/tree/real-g1/docs/deploy_groot/README.md). | ✅ available |
 | [`vla-pi05`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05) | 🧠 VLA | ODE action head for the π0.5 VLA (openpi), replacing its flow-matching action expert. Guide: [`vla/pi05_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05/vla/pi05_ode). | ✅ available |
+| [`wam-imagewam`](https://github.com/NTUMARS/ODE-POLICY/tree/wam-imagewam) | 🧠 WAM | ImageWAM ODE full training and evaluation on standard LIBERO and LIBERO Plus. Guide: [`docs/wam_libero/README.md`](docs/wam_libero/README.md). | ✅ available |
 | [`rl-supermimic`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic) | 🏃 RL | ODE policy as the actor of SuperMimic (world-model RL, Unitree G1 whole-body motion tracking on LAFAN1), with the PPO baseline. Guide: [`rl/supermimic_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/rl-supermimic/rl/supermimic_ode). | ✅ available |
 
 ---
@@ -78,6 +83,8 @@ Against 14 baselines, in simulation and on four real robots:
 | --- | --- |
 | Check the installation in minutes | [Quick start: 2D navigation](#-quick-start-2d-navigation-minutes) |
 | Train and evaluate on LIBERO | [LIBERO](#-libero) |
+| Train ImageWAM ODE and evaluate on LIBERO / LIBERO Plus | [wam-imagewam guide](docs/wam_libero/README.md) |
+| Train GR00T ODE and deploy it on a Unitree G1 | [real-g1 guide](https://github.com/NTUMARS/ODE-POLICY/tree/real-g1/docs/deploy_groot/README.md) |
 | Reproduce the paper's simulation experiments | [docs/REPRODUCE.md](docs/REPRODUCE.md) |
 | Run ODE policy on a Galaxea R1 Lite | [`real-r1lite`: `ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real) |
 | Put an ODE head on the π0.5 VLA | [`vla-pi05`: `vla/pi05_ode/`](https://github.com/NTUMARS/ODE-POLICY/tree/vla-pi05/vla/pi05_ode) |

@@ -1,0 +1,18 @@
+name: libero-plus10030
+benchmark: libero-plus
+suites: [libero_spatial, libero_object, libero_goal, libero_10]
+expected_tasks: 10030
+trials_per_task: 1
+seed: 42
+wait_steps: 30
+resolution: 256
+replan_steps: 12
+max_steps: {libero_spatial: 400, libero_object: 400, libero_goal: 400, libero_10: 700}
+category_counts:
+  Background Textures: 1076
+  Robot Initial States: 1550
+  Camera Viewpoints: 1599
+  Language Instructions: 1537
+  Sensor Noise: 1601
+  Objects Layout: 1525
+  Light Conditions: 1142
