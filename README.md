@@ -8,6 +8,8 @@
 
 [![arXiv](https://img.shields.io/badge/arXiv-2611.01729-b31b1b)](https://arxiv.org/abs/2611.01729) [![Paper](https://img.shields.io/badge/Paper-PDF-b31b1b)](https://arxiv.org/pdf/2611.01729) [![Project WebPage](https://img.shields.io/badge/Project-webpage-00a3a6)](https://ntumars.github.io/ODE/) [![Videos](https://img.shields.io/badge/Robot-videos-blue)](https://ntumars.github.io/ODE/) [![License](https://img.shields.io/badge/License-Apache%202.0-6f42c1)](LICENSE)
 
+[![Papers with Code: SOTA on LIBERO-Spatial](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge.svg?eval=47714&live=1)](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge-link?eval=47714) [![Papers with Code: SOTA on LIBERO-Object](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge.svg?eval=47596&live=1)](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge-link?eval=47596) [![Papers with Code: SOTA on LIBERO-Goal](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge.svg?eval=47597&live=1)](https://paperswithcode.co/api/v1/papers/2611.01729/leaderboard-badge-link?eval=47597)
+
 </div>
 
 > [ODE Policy: Robot Learning via Action Dynamics, Not Actions](https://arxiv.org/abs/2611.01729) \
