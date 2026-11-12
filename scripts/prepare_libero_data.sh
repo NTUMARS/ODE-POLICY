@@ -4,7 +4,8 @@
 #   1. download the official demonstrations (hdf5, ~34 GB)       -> data_raw/libero/<suite>/
 #   2. convert each suite to zarr (+ CLIP instruction embedding)  -> data_policy/<suite>_50demo.zarr
 #   3. merge the four suites into one training set                -> data_policy/libero_4suite_50demo.zarr
-#   4. the ODE policy's virtual-target poses                      -> data_policy/libero_4suite_50demo_ode_vt.zarr
+#   4. the ODE policy's virtual-target poses                      -> data_policy/libero_4suite_50demo_ode_vt_gr5.zarr
+#      (gripper ramped, default policy) and ..._ode_vt.zarr (raw gripper command, the paper's setting)
 #
 #   bash scripts/prepare_libero_data.sh
 #   KDEMO="5 10 20 30" bash scripts/prepare_libero_data.sh   # also the E3 subsets (first K demos per task)
@@ -39,9 +40,14 @@ if [[ -f data_policy/.done_libero_4suite_50demo ]]; then echo "present"; else
     python ode_policy/libero/build_joint_zarr.py --force && touch data_policy/.done_libero_4suite_50demo
 fi
 
-echo "== [4/4] virtual-target poses -> data_policy/libero_4suite_50demo_ode_vt.zarr"
+echo "== [4/4] virtual-target poses -> data_policy/libero_4suite_50demo_ode_vt_gr5.zarr (default ODE policy)"
+echo "         and data_policy/libero_4suite_50demo_ode_vt.zarr (raw gripper command, the paper's setting)"
+if [[ -f data_policy/.done_libero_4suite_50demo_ode_vt_gr5 ]]; then echo "present"; else
+    python ode_policy/libero/build_ode_zarr.py --suite libero_4suite --target virtual --grip_ramp 5 --force \
+        && touch data_policy/.done_libero_4suite_50demo_ode_vt_gr5
+fi
 if [[ -f data_policy/.done_libero_4suite_50demo_ode_vt ]]; then echo "present"; else
-    python ode_policy/libero/build_ode_zarr.py --suite libero_4suite --target virtual --force \
+    python ode_policy/libero/build_ode_zarr.py --suite libero_4suite --target virtual --grip_ramp 1 --force \
         && touch data_policy/.done_libero_4suite_50demo_ode_vt
 fi
 

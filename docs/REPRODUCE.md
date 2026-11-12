@@ -17,6 +17,7 @@ These rules hold for every experiment; the scripts' defaults implement them.
 | Seeds | 42, then 0 and 1 (`train_config.training_params.seed=<seed>`) |
 | Alignment | a model trained on chunks of H steps is executed with chunks of H steps |
 | Integrator | RK4 for every ODE run except E7. The default is Euler, so the ODE commands below pass `policy_config.solver=rk4` |
+| ODE configuration | the paper's: proprioception into the vector field, gripper from a classification head, data with the raw gripper command. Since 2026-11 the defaults differ (proprioception in the condition, gripper as a ramped ODE state; see the README), so the ODE commands below also pass `policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false` and train on `ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt.zarr`: run `export ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt.zarr` once before them |
 
 Train and evaluate on different GPUs: evaluating on the GPU that is training slows FM-DiT
 training by an order of magnitude. Evaluation can start as soon as a checkpoint is written.
@@ -32,7 +33,7 @@ python scripts/count_params.py il_outputs/<run>/libero_4suite/checkpoints/1.ckpt
 ```bash
 CK=[1,2,4,6,8,10,20,30,40,50,60,70,80,90,100]
 for M in ode ode_dit fm_dit fm_unet a2a_dit ddpm_dit ddpm_unet act; do
-  SOLVER=(); [[ $M == ode* ]] && SOLVER=(policy_config.solver=rk4)
+  SOLVER=(); [[ $M == ode* ]] && SOLVER=(policy_config.solver=rk4 policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false)
   bash scripts/train_libero.sh $M libero_4suite policy_name=${M}_E1_s42 "${SOLVER[@]}" \
       train_config.training_params.checkpoint_epochs=$CK train_config.training_params.seed=42
 done
@@ -77,7 +78,7 @@ The first K demonstrations of every task; 50 is E1.
 KDEMO="5 10 20 30" bash scripts/prepare_libero_data.sh
 for K in 5 10 20 30; do
   ZARR=data_policy/libero_4suite_${K}demo_ode_vt.zarr bash scripts/train_libero.sh ode libero_4suite \
-      policy_name=ode_E3_${K}demo_s42 policy_config.solver=rk4 \
+      policy_name=ode_E3_${K}demo_s42 policy_config.solver=rk4 policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false \
       train_config.training_params.checkpoint_epochs=[1,10,20,50,100]
   ZARR=data_policy/libero_4suite_${K}demo.zarr bash scripts/train_libero.sh fm_dit libero_4suite \
       policy_name=fm_dit_E3_${K}demo_s42 train_config.training_params.checkpoint_epochs=[1,10,20,50,100]
@@ -104,7 +105,7 @@ through `hidden_dim` alone: the condition network maps the 8257-d observation fe
 
 ```bash
 bash scripts/train_libero.sh ode libero_4suite policy_name=ode_E4_12M_s42 policy_config.hidden_dim=900 \
-    policy_config.solver=rk4 \
+    policy_config.solver=rk4 policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false \
     train_config.training_params.checkpoint_epochs=[1,10,50,100]
 bash scripts/train_libero.sh fm_dit libero_4suite policy_name=fm_dit_E4_12M_s42 policy_config.hidden_dim=336 \
     train_config.training_params.checkpoint_epochs=[1,10,50,100]
@@ -118,7 +119,7 @@ same H:
 ```bash
 H=16
 bash scripts/train_libero.sh ode libero_4suite policy_name=ode_E5_H${H}_s42 \
-    n_action_steps=$H horizon=$((8 + H)) policy_config.solver=rk4 \
+    n_action_steps=$H horizon=$((8 + H)) policy_config.solver=rk4 policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false \
     train_config.training_params.checkpoint_epochs=[1,10,50,100]
 bash scripts/eval_libero.sh il_outputs/ode_E5_H${H}_s42/libero_4suite/checkpoints/100.ckpt all 20 --replan_every $H
 ```
@@ -156,7 +157,7 @@ stored in the checkpoint and used at evaluation automatically.
 
 ```bash
 for SOLVER in rk2 euler; do
-  bash scripts/train_libero.sh ode libero_4suite policy_name=ode_E7_${SOLVER}_s42 policy_config.solver=$SOLVER \
+  bash scripts/train_libero.sh ode libero_4suite policy_name=ode_E7_${SOLVER}_s42 policy_config.solver=$SOLVER policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false \
       train_config.training_params.checkpoint_epochs=[1,2,4,6,8,10,20,30,40,50,60,70,80,90,100]
 done
 ```
@@ -166,7 +167,7 @@ model for every method), inference time with `bench_policy.py` as in E2.
 
 ## Ablations of the ODE policy
 
-All on the E1 setup (`policy_config.solver=rk4` included), one change each:
+All on the E1 setup (the paper's ODE configuration above, `policy_config.solver=rk4` included), one change each. Rows marked *current default* are what the configuration now uses:
 
 | Ablation | Override |
 |---|---|
@@ -174,8 +175,8 @@ All on the E1 setup (`policy_config.solver=rk4` included), one change each:
 | Diversity head size K | `policy_config.side_head=4` (8, 24, …) |
 | Start perturbation off / scaled | `policy_config.perturb_prob=0` / `policy_config.perturb_pos=0.005 policy_config.perturb_rot=0.015` |
 | Proprioception in the condition as well | `policy_config.cond_use_s=true` |
-| Proprioception in the condition only | `policy_config.cond_use_s=true policy_config.field_use_s=false` |
-| Gripper integrated as an ODE state | `policy_config.grip_ode=true` |
+| Proprioception in the condition only (*current default*) | `policy_config.cond_use_s=true policy_config.field_use_s=false` |
+| Gripper integrated as a ramped ODE state (*current default*) | `policy_config.grip_ode=true`, data `ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt_gr5.zarr` |
 | Measured pose instead of the virtual target | train on `build_ode_zarr.py --target measured` (`ZARR=data_policy/libero_4suite_50demo_ode.zarr`), evaluate with `--gain 3.91` |
 
 Execution-side ablations need no retraining; pass the flag to `scripts/eval_libero.sh`:

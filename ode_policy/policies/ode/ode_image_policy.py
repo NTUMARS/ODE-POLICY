@@ -213,12 +213,22 @@ class ODEImagePolicy(BaseImagePolicy):
         # joint_space: which entries of agent_pos are the live pose, in the order of a
         # (None = the first pose_dim)
         state_pose_index=None,
-        # ablation: the gripper as one more state of the ODE (integrated next to the pose,
-        # command = its sign) instead of the classification head. grip_vel: its velocity
-        # scale (normalised units per step; a flip is 2), grip_ode_weight: its loss weight
+        # the gripper as one more state of the ODE, integrated next to the pose, instead of a
+        # classification head. The data ramps each open/close switch over a few steps
+        # (build_ode_zarr.py --grip_ramp), so the state is continuous; the command sent stays
+        # discrete. grip_vel: its velocity scale (normalised units per step; a flip is 2),
+        # grip_ode_weight: its loss weight.
         grip_ode=False,
         grip_vel=1.0,
         grip_ode_weight=1.0,
+        # grip_carry: "state" continues the next chunk from the integrated gripper state (it is
+        # also the policy's timer through a grasp pause); "sign" snaps it to the command
+        grip_carry="state",
+        # gripper command value meaning "open" (LIBERO: -1) -- the state at an episode start
+        grip_open=-1.0,
+        # command = closed once the state leaves the open side past this value, open again only
+        # when it returns; None = 0.8 * grip_open (switch as soon as a ramp starts closing)
+        grip_thresh=None,
         **kwargs,
     ):
         super().__init__()
@@ -226,6 +236,9 @@ class ODEImagePolicy(BaseImagePolicy):
         self.joint_space = joint_space
         self.n_grippers = int(n_grippers)
         self.grip_ode, self.grip_vel, self.grip_ode_weight = grip_ode, grip_vel, grip_ode_weight
+        assert grip_carry in ("state", "sign"), grip_carry
+        self.grip_carry, self.grip_open = grip_carry, float(grip_open)
+        self.grip_thresh = 0.8 * self.grip_open if grip_thresh is None else float(grip_thresh)
         assert not grip_ode or (self.n_grippers == 1 and side_mode == "velocity"), \
             "grip_ode: one gripper, velocity-mode side head only"
         fp = pose_dim + int(grip_ode)   # field state: pose (+ gripper)
@@ -448,7 +461,7 @@ class ODEImagePolicy(BaseImagePolicy):
         if self.grip_ode:
             # the gripper state continues from the previous chunk; open at an episode start
             gs, go = self._grip_norm()
-            g0 = self._g_carry if self._g_carry is not None else (-gs + go).view(1, 1)
+            g0 = self._g_carry if self._g_carry is not None else (self.grip_open * gs + go).view(1, 1)
             a0 = torch.cat([a0, g0.to(a0.dtype).expand(a0.shape[0], 1)], dim=-1)
         extra, rates = {}, ([] if return_rate else None)
         n = n_steps or self.n_action_steps
@@ -479,14 +492,17 @@ class ODEImagePolicy(BaseImagePolicy):
             assert rates, "return_rate: plain or velocity-mode side-head policies only"
             extra["rate"] = torch.stack(rates, dim=1) / scale
         if self.grip_ode:
-            # command = sign of the integrated gripper state (raw units, open -1 / closed 1)
             gs, go = self._grip_norm()
-            # carry the COMMAND (sign) into the next chunk: training always starts the gripper
-            # state at a demo command (exactly +-1), and an unsnapped state drifts off it
-            g_end = (gtraj[:, -1:].detach() - go) / gs
-            self._g_carry = torch.where(g_end >= 0, 1.0, -1.0) * gs + go
-            extra["grip_state"] = (gtraj - go) / gs
-            glogit = extra["grip_state"][..., None]
+            extra["grip_state"] = (gtraj - go) / gs          # raw command units
+            if self.grip_carry == "state":
+                self._g_carry = gtraj[:, -1:].detach()
+            else:                                             # snap to the command
+                g_end = extra["grip_state"][:, -1:]
+                self._g_carry = torch.where(g_end >= 0, 1.0, -1.0) * gs + go
+            # discrete command: open while the state stays on the open side of grip_thresh,
+            # closed once it has moved past it (a closing ramp starts the close at once)
+            past = (extra["grip_state"] - self.grip_thresh) * (1.0 if self.grip_open < 0 else -1.0)
+            glogit = torch.where(past >= 0, -self.grip_open, self.grip_open)[..., None]
         else:
             glogit = self._grip_logits(c)
             if n != glogit.shape[1] or emit_substeps:

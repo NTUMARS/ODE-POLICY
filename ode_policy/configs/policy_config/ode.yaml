@@ -1,7 +1,11 @@
 # ODE policy (ODE-MLP), da/dt = f(c, s, a). Needs the pose zarr from
 # ode_policy/libero/build_ode_zarr.py (action = [pose(6), gripper(1)]).
-# The defaults below are the configuration used for every result in the paper, except the
-# solver: the paper used rk4 (policy_config.solver=rk4 reproduces it exactly).
+# Defaults (2026-11): proprioception enters through the observation condition, and the gripper
+# is a ramped state of the ODE (build the data with build_ode_zarr.py --grip_ramp 5, the
+# default). They hold up better across datasets (pauses, discrete gripper signals) and under
+# perturbations. The paper's configuration is
+#   policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false
+#   policy_config.solver=rk4   (data: build_ode_zarr.py --grip_ramp 1)
 _target_: ode_policy.policies.ode.ode_image_policy.ODEImagePolicy
 
 shape_meta: ${shape_meta}
@@ -44,9 +48,11 @@ dit_hidden: 512        # field_arch=dit: token width
 dit_layers: 4
 dit_heads: 8
 dit_tokens: 4          # [a, s] is projected to this many tokens
-# proprioception goes to the vector field only, not into the observation condition
-field_use_s: true
-cond_use_s: false
+# proprioception goes into the observation condition (encoded with the images), not straight
+# into the vector field: fed to the field directly, the policy can follow its own state (e.g. the
+# gripper opening it is commanding) instead of the scene. Paper: field_use_s=true cond_use_s=false
+field_use_s: false
+cond_use_s: true
 # diversity head (12 mixture components); 0 = a purely deterministic policy
 side_head: 12
 side_hidden: 256
@@ -57,6 +63,11 @@ pose_dim: 6            # 6 = end-effector pose (LIBERO); 2 = nav2d agent positio
 joint_space: false     # true: a is a joint-position vector (real robot)
 n_grippers: 1
 state_pose_index: null
-grip_ode: false         # ablation: gripper as one more ODE state (command = its sign) instead of the classification head
+# gripper as one more ODE state (ramped in the data, see build_ode_zarr.py --grip_ramp) instead
+# of a classification head; the command sent stays discrete. Paper: grip_ode=false
+grip_ode: true
+grip_carry: state       # grip_ode: next chunk continues from the integrated state (sign = snap to the command)
+grip_open: -1.0         # grip_ode: the command value meaning open (LIBERO -1); state at an episode start
+grip_thresh: null       # grip_ode: closed once the state passes this from the open side; null = 0.8 * grip_open
 grip_vel: 1.0           # grip_ode: velocity scale of the gripper state (normalised units per step; a flip is 2)
 grip_ode_weight: 1.0    # grip_ode: loss weight of the gripper state

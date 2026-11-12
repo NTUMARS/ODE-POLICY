@@ -16,7 +16,7 @@
 #
 # Checkpoints go to il_outputs/<policy_name>/<task_suite>/checkpoints/<epoch>.ckpt
 # (policy_name defaults to the policy). Data: ZARR=<path> overrides the default
-#   ODE policies   data_policy/<task_suite>_50demo_ode_vt.zarr  (virtual-target poses)
+#   ODE policies   data_policy/<task_suite>_50demo_ode_vt_gr5.zarr  (virtual-target poses, gripper ramped)
 #   everything else data_policy/<task_suite>_50demo.zarr         (LIBERO's delta commands)
 # WRIST=1 also conditions on the eye-in-hand camera (not used in the paper).
 set -euo pipefail
@@ -36,7 +36,9 @@ if [[ $# -gt 0 && "$1" != *=* ]]; then
 fi
 
 case "${POLICY}" in
-    ode|ode_dit) ZARR_PATH="${ZARR:-./data_policy/${TASK_SUITE}_50demo_ode_vt.zarr}" ;;
+    # ODE policies: the gripper-ramped data by default; ODE_ZARR (or ZARR) overrides it, e.g. the paper's
+    # ODE_ZARR=./data_policy/libero_4suite_50demo_ode_vt.zarr (see docs/REPRODUCE.md)
+    ode|ode_dit) ZARR_PATH="${ZARR:-${ODE_ZARR:-./data_policy/${TASK_SUITE}_50demo_ode_vt_gr5.zarr}}" ;;
     *)           ZARR_PATH="${ZARR:-./data_policy/${TASK_SUITE}_50demo.zarr}" ;;
 esac
 [[ -d "${ZARR_PATH}" ]] || { echo "missing ${ZARR_PATH}: run scripts/prepare_libero_data.sh first" >&2; exit 1; }

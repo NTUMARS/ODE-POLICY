@@ -34,7 +34,9 @@ case "${METHOD}" in
     ode)
         # the ODE trains on the position itself (+ a dummy gripper column)
         TRAIN_ZARR="${ZARR}_ode"
-        EXTRA="shape_meta.action.shape=[3] policy_config.pose_dim=2 policy_config.hidden_dim=1712 ${EXTRA}" ;;
+        # the paper's configuration (proprioception into the field, no gripper state): this task has no
+        # gripper, and these are the settings its reported numbers come from
+        EXTRA="shape_meta.action.shape=[3] policy_config.pose_dim=2 policy_config.hidden_dim=1712 policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false ${EXTRA}" ;;
     a2a_dit|mars)
         # their flow starts from the action history, read from the state: state = last velocity
         TRAIN_ZARR="./data_policy/nav2d_vel_200.zarr"

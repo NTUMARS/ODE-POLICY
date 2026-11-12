@@ -5,6 +5,10 @@ It is trained by integrating f from the current pose and matching the integrated
 against the demonstrated one, so it needs the pose itself -- never a finite-difference
 velocity, which would inherit the demo's step-to-step jitter.
 
+--grip_ramp 5 (the default) ramps every gripper switch over 5 steps in the ODE copy and writes
+<name>_gr5.zarr, the data of the default policy (gripper integrated as an ODE state, grip_ode);
+--grip_ramp 1 keeps the raw +-1 command (the paper's classification-head setting, <name>.zarr).
+
 --target virtual (the default, used for every result in the paper) is described below;
 --target measured writes the measured pose instead (-> <suite>_50demo_ode.zarr, evaluate
 with --gain 3.91). Row t of `action` (7 numbers):
@@ -64,10 +68,16 @@ def main():
     ap.add_argument("--data_root", default="data_policy")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--target", default="virtual", choices=["measured", "virtual", "delta"])
+    ap.add_argument("--grip_ramp", type=int, default=5,
+                    help="ramp each gripper open/close switch over this many steps in the ODE copy, "
+                         "so the gripper is a continuous state for grip_ode (the default policy); "
+                         "1 = the raw +-1 command (the paper's classification-head setting)")
     args = ap.parse_args()
 
     src = os.path.join(args.data_root, f"{args.suite}_50demo.zarr")
     suffix = {"measured": "_ode", "virtual": "_ode_vt", "delta": "_ode_delta"}[args.target]
+    if args.grip_ramp > 1:
+        suffix += f"_gr{args.grip_ramp}"      # the default policy's data; --grip_ramp 1 = the paper's
     dst = os.path.join(args.data_root, f"{args.suite}_50demo{suffix}.zarr")
     if os.path.exists(dst):
         if not args.force:
@@ -102,6 +112,16 @@ def main():
         sig = pose_signal(state[:, :3], state[:, 3:7])
     grip = np.sign(act[:, 6])
     grip[grip == 0] = 1.0
+    if args.grip_ramp > 1:
+        # each switch becomes a linear ramp over grip_ramp steps starting at the switch;
+        # episodes start open (-1). The command the policy sends stays discrete.
+        n = args.grip_ramp
+        for a, b in zip(np.concatenate([[0], ends[:-1]]), ends):
+            c = grip[a:b].copy()
+            for k in np.flatnonzero(c[1:] != c[:-1]) + 1:
+                m = min(n, len(c) - k)
+                grip[a + k:a + k + m] = c[k - 1] + (c[k] - c[k - 1]) * np.arange(1, m + 1) / n
+            grip[a] = -1.0
     acts = np.concatenate([sig, grip[:, None]], axis=1).astype(np.float32)
 
     os.makedirs(os.path.join(dst, "data"), exist_ok=True)
@@ -121,6 +141,7 @@ def main():
     out = zarr.open(dst, mode="a")
     out["data"].create_dataset("action", data=acts, chunks=(4096, ACTION_DIM),
                                dtype="float32", overwrite=True)
+    out.attrs["grip_ramp"] = int(args.grip_ramp)
 
     # per-step motion, within episodes only -- sets the scale of f's output
     starts = np.concatenate([[0], ends[:-1]])

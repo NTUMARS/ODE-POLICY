@@ -56,8 +56,16 @@ targets, two grippers).
    not from the measured pose.
 3. **Tracker gain 1, no velocity feed-forward** when learning the virtual target: it already
    contains the tracking lag, and compensating again overshoots.
-4. **Proprioception goes into the vector field only** (`field_use_s=true`, `cond_use_s=false`).
-5. **Single-mode tasks take the diversity head's component centre** (the evaluators' default);
+4. **Proprioception goes into the observation condition** (`cond_use_s=true`, `field_use_s=false`, the
+   default). Fed straight into the vector field, the policy can follow its own state (for instance the
+   gripper opening it is itself commanding) instead of the scene; on LIBERO both work, on joint-space
+   data with pauses it is the difference between stalling and succeeding.
+5. **A discrete gripper is a ramped ODE state** (`grip_ode=true`, the default). Ramp every open/close
+   switch of the demonstrations over a few steps in the ODE copy of the data (LIBERO:
+   `build_ode_zarr.py --grip_ramp 5`), keep sending a discrete command, and set `grip_open` to the value
+   that means open in your data (LIBERO -1). The integrated state also acts as a timer through grasp
+   pauses, where a stateless field would stand still.
+6. **Single-mode tasks take the diversity head's component centre** (the evaluators' default);
    sample inside the component only when the task is genuinely multimodal.
 
 ## Attaching ODE policy to a VLA

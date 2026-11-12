@@ -23,6 +23,12 @@
 
 ## 📰 News
 
+- **[2026-11-13]** 🧩 **New default configuration, sturdier across datasets.** Proprioception now enters through the
+  observation condition, and a discrete gripper is integrated as a *ramped state of the ODE* instead of a
+  classification head (the command sent stays discrete). On LIBERO it matches the paper's configuration;
+  on data with pauses and discrete gripper signals it no longer stalls.
+  See [Default configuration](#-default-configuration-2026-11). The paper's configuration is one set of flags away
+  ([docs/REPRODUCE.md](docs/REPRODUCE.md)).
 - **[2026-11-09]** ⚡ **The ODE policy now defaults to the *Euler* solver**, which learns about as well as RK4 and
   generates a chunk of 8 actions in 5.7 ms on LIBERO. Add `policy_config.solver=rk4` to reproduce the paper's runs exactly.
 - **[2026-11-03]** 📄 **The paper is on arXiv:** [2611.01729](https://arxiv.org/abs/2611.01729).
@@ -104,7 +110,11 @@ da/dt = f(c, s, a)
 - **a**: the action state, i.e. the reference the controller tracks. On LIBERO this is the end-effector pose the
   controller is aiming at (the *virtual target*, see [docs/METHOD_NOTES.md](docs/METHOD_NOTES.md)).
 - **c**: the observation condition (8 frames of images and the language instruction).
-- **s**: proprioception, given to the vector field only.
+- **s**: proprioception, encoded into the condition together with the images (the paper gave it to the vector
+  field directly; see [Default configuration](#-default-configuration-2026-11)).
+- **Gripper**: one more state of the ODE, integrated next to the pose. Each open/close switch of the
+  demonstrations is ramped over a few steps, so the state is continuous; the command sent to the robot is
+  read off it and stays discrete.
 
 1. **Decide.** Every H = 8 control steps, read the observation once and encode the condition `c`. `c` and `s` stay
    fixed for the chunk.
@@ -142,6 +152,39 @@ are untouched, and with ε = 0 the policy is exactly the plain ODE.
 
 All methods share the same observation encoder (ResNet18 with GroupNorm, randomly initialised, 8 frames and a frozen
 CLIP embedding of the instruction) and, on LIBERO, about 24M parameters outside the encoder.
+
+## 🧩 Default configuration (2026-11)
+
+Two defaults changed after the paper, both in [`ode.yaml`](ode_policy/configs/policy_config/ode.yaml):
+
+| | Paper | Now |
+| --- | --- | --- |
+| Proprioception `s` | into the vector field (`field_use_s=true cond_use_s=false`) | into the observation condition (`field_use_s=false cond_use_s=true`) |
+| Discrete gripper | separate classification head (`grip_ode=false`) | a ramped state of the ODE, discrete command (`grip_ode=true`, data `build_ode_zarr.py --grip_ramp 5`) |
+
+**Why.** Fed straight into the field, proprioception lets the policy continue from its own state instead of reading
+the scene; with a gripper whose opening follows the command, it ends up copying that opening. A stateless field also
+cannot represent *wait, then move*: demonstrations that pause after closing the gripper (motion-planned data, Tool
+Hang-like tasks) make it stand still. The integrated gripper state carries the timing through such pauses.
+
+**Evidence** (one seed; success rate %).
+
+| Setting | Paper configuration | New default |
+| --- | --- | --- |
+| LIBERO, four suites, epochs 1 / 5 / 10 / 20 (RK4, 10 episodes per task) | 79.2 / 95.0 / 92.8 / 93.0 | 75.0 / 91.8 / 92.8 / 92.0 |
+| ManiSkill3 PickCube, joint control, motion-planned demos with a pause after each grasp (epoch 100)¹ | 33 (stalls at the grasp) | 100 |
+
+On ManiSkill3 (joint control, 200 demonstrations, 100 test episodes per point) the new default against FM-DiT on the
+same data, epochs 10 / 50 / 100: PickCube 96 / 100 / 100 vs 23 / 88 / 90, StackCube 9 / 29 / 26 vs 0 / 6 / 9,
+PushCube 99 / 97 / 97 vs 100 / 95 / 96, with 3–15× lower end-effector jerk and ~10× faster inference. The ManiSkill3
+pipeline will be released on its own branch.
+
+¹ ManiSkill3 runs: no diversity head, start perturbation 0.03 rad per joint, Euler; the paper-configuration number
+is from an earlier run with 30 test episodes.
+
+To get the paper's configuration back: `policy_config.field_use_s=true policy_config.cond_use_s=false
+policy_config.grip_ode=false` (add `policy_config.solver=rk4` for the exact runs) and train on
+`ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt.zarr`.
 
 ## 🛠️ Installation
 
@@ -181,8 +224,9 @@ bash scripts/prepare_libero_data.sh
 
 This downloads the official demonstrations, converts each suite to zarr with a CLIP embedding of every instruction,
 merges the four suites into one training set (`data_policy/libero_4suite_50demo.zarr`, 40 tasks, 2000 demonstrations)
-and derives the ODE policy's virtual-target version (`data_policy/libero_4suite_50demo_ode_vt.zarr`, images are
-symlinked, so it costs megabytes).
+and derives the ODE policy's virtual-target versions (images are symlinked, so they cost megabytes):
+`data_policy/libero_4suite_50demo_ode_vt_gr5.zarr` with the gripper switches ramped over 5 steps (the default policy)
+and `data_policy/libero_4suite_50demo_ode_vt.zarr` with the raw gripper command (the paper's configuration).
 
 **Train** one model on all four suites (100-epoch cosine schedule, batch 32, seed 42):
 
@@ -193,8 +237,9 @@ bash scripts/train_libero.sh ode libero_4suite train_config.training_params.chec
 ```
 
 Checkpoints are written to `il_outputs/<policy>/libero_4suite/checkpoints/<epoch>.ckpt`. The configuration in
-[`ode.yaml`](ode_policy/configs/policy_config/ode.yaml) is the one used in the paper except the solver, which defaults
-to *Euler*. Add `policy_config.solver=rk4` to reproduce the paper's runs exactly.
+[`ode.yaml`](ode_policy/configs/policy_config/ode.yaml) is the current default (see
+[Default configuration](#-default-configuration-2026-11)); the paper's runs are reproduced with the flags in
+[docs/REPRODUCE.md](docs/REPRODUCE.md).
 
 **Evaluate** on the four suites (10 tasks × 20 episodes each, LIBERO's fixed initial states):
 

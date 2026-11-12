@@ -86,11 +86,15 @@ executing 8 steps was much worse than training and executing 8.
 
 - **Always pass the right tracker gain.** Gain 1 for virtual-target models (the default), 3.91
   for measured-pose models. A wrong gain silently costs many points.
-- **The gripper as an ODE state** (`grip_ode=true`) needs the integrated state snapped back to
-  ±1 at every chunk boundary (training always starts it at a demonstrated command, so an
-  unsnapped state drifts away and carries the whole state with it). Even then it is fragile: the
-  open/close transitions get steeper with longer training and the policy eventually breaks. A
-  near-binary signal does not belong in an ODE; the default classification head is the robust
-  choice.
+- **The gripper as an ODE state** (`grip_ode=true`, the default since 2026-11). With the raw ±1
+  command as its target the state has to jump, and carrying the integrated state across chunks let it
+  drift; snapping it to ±1 worked early but broke after longer training (the paper's ablation). Ramping
+  every switch over a few steps in the data (`build_ode_zarr.py --grip_ramp 5`) makes the target
+  continuous, so the state is carried as is (`grip_carry=state`) and the command is read off it with a
+  threshold near the open side (`grip_thresh`, default 0.8 × `grip_open`), which closes as soon as a ramp
+  starts. On LIBERO it matches the classification head (92.0 vs 93.0 at epoch 20, four suites) and does not
+  break; on joint-space data with a pause after each grasp it is what lets the policy lift instead of
+  waiting forever (the state is a timer). Releasing fires a few steps after the demonstration (when the
+  state is back near open); a shorter ramp shortens that delay.
 - **Evaluation noise.** With 20 episodes per task (200 per suite), differences under ~2 points
   are not significant.
