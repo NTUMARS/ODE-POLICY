@@ -29,9 +29,11 @@ camera at a lower rate than the control loop) learned much worse and degraded wi
 in the demonstrations `a` and `s` are nearly the same quantity, so a field that sees the
 demonstration's `s` at every step learns to copy it.
 
-**Proprioception goes into the vector field, not the condition.** Feeding `s` into the
-observation encoder as well (as most policies do) was clearly worse than giving it only to the
-field.
+**Proprioception goes into the condition (default since 2026-11).** On LIBERO, giving `s` to the
+vector field directly learns faster in the first epochs, and both placements perform similarly
+afterwards. On data with frequent pauses and high-precision tasks (e.g. ManiSkill3), the placement
+in the condition is more stable, so we recommend it unless the very first epochs matter. The
+arXiv paper used the field placement (`field_use_s=true cond_use_s=false`).
 
 **The start perturbation makes learning faster.** Shifting half the training starts by ~1 cm /
 0.03 rad and asking the path to return (offset × 0.7^k) gives a large gain in the first epochs;

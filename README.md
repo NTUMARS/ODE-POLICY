@@ -101,22 +101,24 @@ Against 14 baselines, in simulation and on four real robots:
   <img src="docs/assets/method.jpg" alt="Direct-action policies vs. ODE policy" width="100%">
 </p>
 
-The policy learns a velocity field
+The policy encodes the observation and the proprioception into an embedding and learns a velocity field of the action
 
 ```
-da/dt = f(c, s, a)
+z     = E(c, s)
+da/dt = f(a, z)
 ```
 
 - **a**: the action state, i.e. the reference the controller tracks. On LIBERO this is the end-effector pose the
   controller is aiming at (the *virtual target*, see [docs/METHOD_NOTES.md](docs/METHOD_NOTES.md)).
 - **c**: the observation condition (8 frames of images and the language instruction).
-- **s**: proprioception, encoded into the condition together with the images (the paper gave it to the vector
+- **s**: proprioception, encoded into the condition together with the images (the arXiv paper gave it to the vector
   field directly; see [Default configuration](#-default-configuration-2026-11)).
+- **z**: the embedding of `c` and `s`, computed once per chunk.
 - **Gripper**: one more state of the ODE, integrated next to the pose. Each open/close switch of the
   demonstrations is ramped over a few steps, so the state is continuous; the command sent to the robot is
   read off it and stays discrete.
 
-1. **Decide.** Every H = 8 control steps, read the observation once and encode the condition `c`. `c` and `s` stay
+1. **Decide.** Every H = 8 control steps, read the observation once and encode `c` and `s` into `z`. `z` stays
    fixed for the chunk.
 2. **Integrate.** Integrate the field with *Euler* for 8 steps (one field call per step), starting from the last
    integrated action rather than the measured pose, so consecutive chunks join without a jump. The paper used RK4.
