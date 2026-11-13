@@ -25,8 +25,9 @@
 
 - **[2026-11-13]** 🧩 **New default configuration, sturdier across datasets.** Proprioception now enters through the
   observation condition, and a discrete gripper is integrated as a *ramped state of the ODE* instead of a
-  classification head (the command sent stays discrete). On LIBERO it matches the paper's configuration;
-  on data with pauses and discrete gripper signals it no longer stalls.
+  classification head (the command sent stays discrete). On LIBERO it matches the paper's configuration and
+  generalizes better on LIBERO-plus (51.3% vs 34.3% zero-shot); on data with pauses and discrete gripper signals
+  it no longer stalls.
   See [Default configuration](#-default-configuration-2026-11). The paper's configuration is one set of flags away
   ([docs/REPRODUCE.md](docs/REPRODUCE.md)).
 - **[2026-11-09]** ⚡ **The ODE policy now defaults to the *Euler* solver**, which learns about as well as RK4 and
@@ -174,6 +175,7 @@ Hang-like tasks) make it stand still. The integrated gripper state carries the t
 | Setting | Paper configuration | New default |
 | --- | --- | --- |
 | LIBERO, four suites, epochs 1 / 5 / 10 / 20 (RK4, 10 episodes per task) | 79.2 / 95.0 / 92.8 / 93.0 | 75.0 / 91.8 / 92.8 / 92.0 |
+| LIBERO-plus, libero_10 zero-shot, the same 300 perturbed instances (epoch 20): camera / robot init / layout / background / light / noise | 34.3: 0 / 54 / 50 / 46 / 34 / 22 | **51.3**: 14 / 76 / 48 / 62 / 58 / 50 |
 | ManiSkill3 PickCube, joint control, motion-planned demos with a pause after each grasp (epoch 100)¹ | 33 (stalls at the grasp) | 100 |
 
 On ManiSkill3 (joint control, 200 demonstrations, 100 test episodes per point) the new default against FM-DiT on the
