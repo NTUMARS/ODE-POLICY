@@ -71,3 +71,4 @@ grip_open: -1.0         # grip_ode: the command value meaning open (LIBERO -1); 
 grip_thresh: null       # grip_ode: closed once the state passes this from the open side; null = 0.8 * grip_open
 grip_vel: 1.0           # grip_ode: velocity scale of the gripper state (normalised units per step; a flip is 2)
 grip_ode_weight: 1.0    # grip_ode: loss weight of the gripper state
+grip_clamp: true        # grip_ode: clamp the gripper state to +-|grip_open| after every integration step (no loss spikes)

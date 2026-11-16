@@ -229,6 +229,10 @@ class ODEImagePolicy(BaseImagePolicy):
         # command = closed once the state leaves the open side past this value, open again only
         # when it returns; None = 0.8 * grip_open (switch as soon as a ramp starts closing)
         grip_thresh=None,
+        # keep the gripper state inside the command range (+-|grip_open|) after every
+        # integration step: unbounded, the stiff ramp velocity overshoots under explicit
+        # integration and can grow without limit within one chunk (loss spikes)
+        grip_clamp=True,
         **kwargs,
     ):
         super().__init__()
@@ -239,6 +243,7 @@ class ODEImagePolicy(BaseImagePolicy):
         assert grip_carry in ("state", "sign"), grip_carry
         self.grip_carry, self.grip_open = grip_carry, float(grip_open)
         self.grip_thresh = 0.8 * self.grip_open if grip_thresh is None else float(grip_thresh)
+        self.grip_clamp = bool(grip_clamp)
         assert not grip_ode or (self.n_grippers == 1 and side_mode == "velocity"), \
             "grip_ode: one gripper, velocity-mode side head only"
         fp = pose_dim + int(grip_ode)   # field state: pose (+ gripper)
@@ -369,11 +374,23 @@ class ODEImagePolicy(BaseImagePolicy):
                     k3 = f(a + 0.5 * h * k2)
                     k4 = f(a + h * k3)
                     a = a + h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+                if Pf > P and self.grip_clamp:
+                    a = self._clamp_grip(a)
                 if emit_substeps:
                     out.append(a)
             if not emit_substeps:
                 out.append(a)
         return torch.stack(out, dim=1)
+
+    def _clamp_grip(self, a):
+        """The gripper state (column pose_dim) clamped to +-|grip_open| in raw command units."""
+        P = self.pose_dim
+        sc, of = self._grip_norm()
+        b = abs(self.grip_open)
+        lo = torch.minimum(-b * sc + of, b * sc + of).to(a.dtype)
+        hi = torch.maximum(-b * sc + of, b * sc + of).to(a.dtype)
+        g = torch.maximum(torch.minimum(a[..., P:P + 1], hi), lo)
+        return torch.cat([a[..., :P], g, a[..., P + 1:]], dim=-1)
 
     def _pose_norm(self):
         p = self.normalizer["action"].params_dict
