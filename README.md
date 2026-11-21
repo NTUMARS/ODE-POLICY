@@ -104,181 +104,107 @@ Against 14 baselines, in simulation and on four real robots:
   <img src="docs/assets/method.jpg" alt="Direct-action policies vs. ODE policy" width="100%">
 </p>
 
-The policy encodes the observation and the proprioception into an embedding and learns a velocity field of the action
-
 ```
-z     = E(c, s)
-da/dt = f(a, z)
+z     = E(c, s)          # observation c and proprioception s, encoded once per chunk
+da/dt = f(a, z)          # vector field of the action state a
 ```
 
-- **a**: the action state, i.e. the reference the controller tracks. On LIBERO this is the end-effector pose the
-  controller is aiming at (the *virtual target*, see [docs/METHOD_NOTES.md](docs/METHOD_NOTES.md)).
-- **c**: the observation condition (8 frames of images and the language instruction).
-- **s**: proprioception, encoded into the condition together with the images (the arXiv paper gave it to the vector
-  field directly; see [Default configuration](#-default-configuration-2026-11)).
-- **z**: the embedding of `c` and `s`, computed once per chunk.
-- **Gripper**: one more state of the ODE, integrated next to the pose. Each open/close switch of the
-  demonstrations is ramped over a few steps, so the state is continuous; the command sent to the robot is
-  read off it and stays discrete.
+The action state `a` is the reference the controller tracks (on LIBERO the *virtual target*, see
+[docs/METHOD_NOTES.md](docs/METHOD_NOTES.md)). A discrete gripper is one more state, ramped over a few steps in the
+data. Every H = 8 steps the policy encodes `z` and integrates the field with *Euler* for 8 steps, starting from the
+last integrated action, so consecutive chunks join without a jump.
 
-1. **Decide.** Every H = 8 control steps, read the observation once and encode `c` and `s` into `z`. `z` stays
-   fixed for the chunk.
-2. **Integrate.** Integrate the field with *Euler* for 8 steps (one field call per step), starting from the last
-   integrated action rather than the measured pose, so consecutive chunks join without a jump. The paper used RK4.
-   RK4, RK2 and *Euler* learn about equally well.
-3. **Track.** The robot's controller tracks the 8 integrated references.
-
-**Training.** Integrate the field from the demonstrated action for 8 steps and match the whole path to the
-demonstration (MSE), backpropagating through the solver. No velocity labels, no differencing. A contractive start
-perturbation (start shifted by δ, target offset shrinking by ρ^k) teaches the field to pull drift back to the
-demonstration.
-
-**Optional diversity head.** A small head reads the field's (detached) features at the chunk start and samples a
-direction ε from a learned mixture, added to the velocity with a learned per-step rate. The field and its gradients
-are untouched, and with ε = 0 the policy is exactly the plain ODE.
+**Training.** Integrate from the demonstrated action and match the whole path (MSE, backpropagated through the
+solver). A contractive start perturbation teaches the field to pull drift back. An optional diversity head samples a
+start direction for multi-modal data and leaves the plain ODE unchanged when off.
 
 ### Methods on `main`
 
-`<policy>` is the name used by the scripts below.
-
 | Policy | Name | Action head |
 | --- | --- | --- |
-| **ODE-MLP** (ours) | `ode` | velocity field = FiLM residual MLP, integrated with *Euler* |
-| **ODE-DiT** (ours) | `ode_dit` | velocity field = adaLN DiT blocks, integrated with *Euler* |
-| FM-DiT | `fm_dit` | conditional flow matching, DiT |
-| FM-UNet | `fm_unet` | conditional flow matching, 1D UNet |
-| A2A-DiT | `a2a_dit` | flow from the action history, DiT |
-| A2A | `a2a` | flow from the action history, MLP |
-| DDPM-DiT | `ddpm_dit` | diffusion, DiT |
-| DDPM-UNet | `ddpm_unet` | diffusion, 1D UNet (Diffusion Policy) |
-| DDIM-UNet | `ddim_unet` | DDIM sampling, 1D UNet |
-| MARS | `mars` | flow matching with a learned history / noise router |
+| **ODE-MLP** (ours) | `ode` | velocity field = FiLM residual MLP |
+| **ODE-DiT** (ours) | `ode_dit` | velocity field = adaLN DiT blocks |
+| FM-DiT / FM-UNet | `fm_dit` / `fm_unet` | conditional flow matching |
+| A2A-DiT / A2A | `a2a_dit` / `a2a` | flow from the action history |
+| DDPM-DiT / DDPM-UNet / DDIM-UNet | `ddpm_dit` / `ddpm_unet` / `ddim_unet` | diffusion (Diffusion Policy) |
+| MARS | `mars` | flow matching with a history / noise router |
 | ACT | `act` | CVAE + transformer decoder |
 
-All methods share the same observation encoder (ResNet18 with GroupNorm, randomly initialised, 8 frames and a frozen
-CLIP embedding of the instruction) and, on LIBERO, about 24M parameters outside the encoder.
+All share the same observation encoder (ResNet18, 8 frames, frozen CLIP instruction embedding).
 
 ## 🧩 Default configuration (2026-11)
 
-Two defaults changed after the paper, both in [`ode.yaml`](ode_policy/configs/policy_config/ode.yaml):
+Two defaults in [`ode.yaml`](ode_policy/configs/policy_config/ode.yaml) changed after the paper:
 
 | | Paper | Now |
 | --- | --- | --- |
-| Proprioception `s` | into the vector field (`field_use_s=true cond_use_s=false`) | into the observation condition (`field_use_s=false cond_use_s=true`) |
-| Discrete gripper | separate classification head (`grip_ode=false`) | a ramped state of the ODE, discrete command (`grip_ode=true`, data `build_ode_zarr.py --grip_ramp 5`) |
+| Proprioception `s` | into the vector field | into the observation condition (`cond_use_s=true`) |
+| Discrete gripper | classification head | a ramped ODE state (`grip_ode=true`, data `--grip_ramp 5`) |
 
-**Why.** Fed straight into the field, proprioception lets the policy continue from its own state instead of reading
-the scene; with a gripper whose opening follows the command, it ends up copying that opening. A stateless field also
-cannot represent *wait, then move*: demonstrations that pause after closing the gripper (motion-planned data, Tool
-Hang-like tasks) make it stand still. The integrated gripper state carries the timing through such pauses.
+Fed into the field, proprioception lets the policy copy its own state instead of reading the scene, and a stateless
+field stalls on demonstrations that pause after a grasp.
 
-**Evidence** (one seed; success rate %).
-
-| Setting | Paper configuration | New default |
+| Success % (one seed) | Paper configuration | New default |
 | --- | --- | --- |
-| LIBERO, four suites, epochs 1 / 5 / 10 / 20 (RK4, 10 episodes per task) | 79.2 / 95.0 / 92.8 / 93.0 | 75.0 / 91.8 / 92.8 / 92.0 |
-| LIBERO-plus, libero_10 zero-shot, the same 300 perturbed instances (epoch 20): camera / robot init / layout / background / light / noise | 34.3: 0 / 54 / 50 / 46 / 34 / 22 | **51.3**: 14 / 76 / 48 / 62 / 58 / 50 |
-| ManiSkill3 PickCube, joint control, motion-planned demos with a pause after each grasp (epoch 100)¹ | 33 (stalls at the grasp) | 100 |
+| LIBERO, four suites, epochs 1 / 5 / 10 / 20 | 79.2 / 95.0 / 92.8 / 93.0 | 75.0 / 91.8 / 92.8 / 92.0 |
+| LIBERO-plus, libero_10 zero-shot (epoch 20) | 34.3 | **51.3** |
+| ManiSkill3 PickCube, demos that pause after the grasp | 33 (stalls) | 100 |
 
-On ManiSkill3 (joint control, 200 demonstrations, 100 test episodes per point) the new default against FM-DiT on the
-same data, epochs 10 / 50 / 100: PickCube 96 / 100 / 100 vs 23 / 88 / 90, StackCube 9 / 29 / 26 vs 0 / 6 / 9,
-PushCube 99 / 97 / 97 vs 100 / 95 / 96, with 3–15× lower end-effector jerk and ~10× faster inference. The
-ManiSkill3 pipeline is in [ManiSkill3 and robomimic](#-maniskill3-and-robomimic).
-
-¹ ManiSkill3 runs: no diversity head, start perturbation 0.03 rad per joint, Euler; the paper-configuration number
-is from an earlier run with 30 test episodes.
-
-To get the paper's configuration back: `policy_config.field_use_s=true policy_config.cond_use_s=false
-policy_config.grip_ode=false` (add `policy_config.solver=rk4` for the exact runs) and train on
-`ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt.zarr`.
+The paper's configuration: `policy_config.field_use_s=true policy_config.cond_use_s=false policy_config.grip_ode=false
+policy_config.solver=rk4` with `ODE_ZARR=data_policy/libero_4suite_50demo_ode_vt.zarr`.
 
 ## 🛠️ Installation
 
-Linux with an NVIDIA GPU and conda. One script sets up everything, with the exact versions the paper's results were
-produced with (Python 3.10, PyTorch 2.5.1 + CUDA 12.1, robosuite 1.4.1, MuJoCo 2.3.5, LIBERO at a pinned commit):
+Linux, an NVIDIA GPU and conda. One script installs the exact versions behind the paper (Python 3.10, PyTorch 2.5.1
++ CUDA 12.1, robosuite 1.4.1, MuJoCo 2.3.5, LIBERO at a pinned commit):
 
 ```bash
 git clone https://github.com/NTUMARS/ODE-POLICY.git && cd ODE-POLICY
-bash scripts/setup_env.sh          # creates the conda env "ode_policy"
+bash scripts/setup_env.sh          # conda env "ode_policy"; options ENV_NAME, ENV_PREFIX, TORCH_CUDA
 conda activate ode_policy
 ```
 
-Options (environment variables): `ENV_NAME`, `ENV_PREFIX` (env at a path), `TORCH_CUDA` (`cu118` / `cu121` / `cpu`).
-LIBERO's path config is written to `third_party/libero_config/` and selected through `LIBERO_CONFIG_PATH`, set for
-this conda env only (`~/.libero` is not touched). Rendering uses EGL (`MUJOCO_GL=egl`, set by the scripts).
-
 ## 🧭 Quick start: 2D navigation (minutes)
 
-A circle agent passes one of four gaps in a wall, and all four routes are demonstrated equally often. A quick check
-that the installation works, and the multimodality experiment of the paper:
+A circle agent passes one of four gaps in a wall, all four demonstrated equally often (the paper's multimodality task):
 
 ```bash
 bash scripts/run_nav2d.sh ode        # also: fm_dit | a2a_dit | mars;  optional 2nd arg: seed
 ```
 
-It generates 200 demonstrations, trains for 20 epochs and evaluates 100 rollouts at epochs 1 / 3 / 5 / 10 / 20:
-success rate, how often each route is taken, and the mode balance γ (1 = all four routes equally often). Results and
-trajectory plots are written to `il_outputs/ode_nav2d_s42/nav2d/eval/`.
+It trains for 20 epochs and reports success, route frequencies and the mode balance γ in
+`il_outputs/ode_nav2d_s42/nav2d/eval/`.
 
 ## 🧪 LIBERO
 
-**Data** (≈34 GB download):
-
 ```bash
-bash scripts/prepare_libero_data.sh
+bash scripts/prepare_libero_data.sh                                  # ≈34 GB, 4 suites, 2000 demonstrations
+bash scripts/train_libero.sh ode                                     # or any policy name above
+bash scripts/eval_libero.sh il_outputs/ode/libero_4suite/checkpoints/100.ckpt   # optional 2nd arg: one suite
 ```
 
-This downloads the official demonstrations, converts each suite to zarr with a CLIP embedding of every instruction,
-merges the four suites into one training set (`data_policy/libero_4suite_50demo.zarr`, 40 tasks, 2000 demonstrations)
-and derives the ODE policy's virtual-target versions (images are symlinked, so they cost megabytes):
-`data_policy/libero_4suite_50demo_ode_vt_gr5.zarr` with the gripper switches ramped over 5 steps (the default policy)
-and `data_policy/libero_4suite_50demo_ode_vt.zarr` with the raw gripper command (the paper's configuration).
-
-**Train** one model on all four suites (100-epoch cosine schedule, batch 32, seed 42):
-
-```bash
-bash scripts/train_libero.sh ode
-bash scripts/train_libero.sh fm_dit            # any policy name from the table above
-bash scripts/train_libero.sh ode libero_4suite train_config.training_params.checkpoint_epochs=[1,10,100]
-```
-
-Checkpoints are written to `il_outputs/<policy>/libero_4suite/checkpoints/<epoch>.ckpt`. The configuration in
-[`ode.yaml`](ode_policy/configs/policy_config/ode.yaml) is the current default (see
-[Default configuration](#-default-configuration-2026-11)); the paper's runs are reproduced with the flags in
-[docs/REPRODUCE.md](docs/REPRODUCE.md).
-
-**Evaluate** on the four suites (10 tasks × 20 episodes each, LIBERO's fixed initial states):
-
-```bash
-bash scripts/eval_libero.sh il_outputs/ode/libero_4suite/checkpoints/100.ckpt
-bash scripts/eval_libero.sh il_outputs/ode/libero_4suite/checkpoints/100.ckpt libero_object
-```
-
-The ODE evaluator defaults to the paper's protocol (8 steps per inference, carried execution, tracker gain 1, centre
-of the diversity head's mixture component). Every evaluation also records execution quality: completion time,
-end-effector jerk, command smoothness inside and across chunks, and inference time (`__exec__` in the result json).
+One model is trained on all 40 tasks (100 epochs, batch 32) and tested on 10 tasks × 20 episodes per suite. Each
+evaluation also records completion time, jerk, smoothness and inference time (`__exec__` in the result json).
 
 > [!TIP]
-> To reproduce the paper's experiments (data efficiency, network size, chunk length, integrator, LIBERO-plus zero-shot
-> generalization, inference speed), see [docs/REPRODUCE.md](docs/REPRODUCE.md).
+> To reproduce the paper's experiments, see [docs/REPRODUCE.md](docs/REPRODUCE.md).
 
 ## 🦾 ManiSkill3 and robomimic
 
-One model per method is trained on all tasks of a benchmark and tested on each, as on LIBERO.
+One model per method is trained on all tasks of a benchmark, as on LIBERO.
 
 | | ManiSkill3 | robomimic |
 | --- | --- | --- |
 | Tasks | 8: PushCube, PickCube, StackCube, PullCube, LiftPegUpright, PlaceSphere, PullCubeTool, StackPyramid | 4: Tool Hang, Square, Can, Lift |
 | Demonstrations | 200 per task, motion planning | 200 per task, proficient human |
-| Input, action | 128 px base camera, joint state; joint targets | agent-view and wrist cameras at 240 px, CLIP task embedding; end-effector pose |
+| Input, action | 128 px base camera, joint state; joint targets | agent-view and wrist cameras at 240 px; end-effector pose |
 | ODE setting | gripper state sent as the command (`grip_cmd=raw`) | same, plus dropout 0.3 on the field's pose outputs |
 | Mean success %, epochs 1 / 5 / 10 / 20 / 50: ODE | **34.1 / 52.8 / 64.8 / 69.6 / 72.5** | **8.2 / 43.8 / 65.5 / 86.8 / 85.8** |
 | FM-DiT | 9.4 / 28.4 / 40.5 / 55.0 / 71.1 | 9.3 / 35.0 / 50.2 / 64.2 / 83.3 |
 | Inference per chunk, ODE vs FM-DiT | 5.7 vs 55.0 ms | 12.3 vs 68.1 ms |
 | End-effector jerk, ODE vs FM-DiT | 4.4 vs 8.2 m/s³ | 4.3 vs 10.6 m/s³ |
 
-One seed, 100 test episodes per task and checkpoint. Inference time and jerk are measured at epoch 50 (jerk over
-successful episodes).
+One seed, 100 test episodes per task and checkpoint; time and jerk at epoch 50.
 
 ```bash
 # ManiSkill3 (environment: ode_policy/maniskill/README.md)
@@ -291,22 +217,14 @@ bash scripts/train_robomimic.sh ode
 bash scripts/eval_robomimic.sh il_outputs/ode/rm4/checkpoints/50.ckpt
 ```
 
-**Small datasets overfit.** robomimic has only 200 demonstrations per task. On it the ODE fits the training paths
-almost exactly, and its success drops after about epoch 20. Dropout on the vector field fixes this: one mask per
-chunk, off at test time (`policy_config.field_dropout=0.3 policy_config.field_dropout_pose=true`). For single-task
-models at epoch 100 it raises Square from 73% to 93% and Transport from 38% to 80%. `train_robomimic.sh` turns it
-on. LIBERO (2000 demonstrations) and ManiSkill3 (1600) do not need it.
+**Small datasets overfit.** With 200 demonstrations per task the ODE fits robomimic's training paths almost exactly.
+Dropout on the vector field (`policy_config.field_dropout=0.3 policy_config.field_dropout_pose=true`) fixes this,
+e.g. Square 73% → 93% at epoch 100. LIBERO and ManiSkill3 do not need it.
 
 ## 🦾 Bring ODE policy to your robot
 
-The one step that matters is choosing the action state `a` so that the controller reproduces the demonstration from
-it. [docs/PORTING.md](docs/PORTING.md) covers:
-
-- **The virtual target** for delta controllers, and absolute and joint-space control.
-- **The pose representation** of the action state.
-- **The settings that must stay aligned** between training and execution.
-
-[docs/METHOD_NOTES.md](docs/METHOD_NOTES.md) collects what we learned along the way, including what did not work.
+The step that matters is choosing the action state `a` so that the controller reproduces the demonstration from it.
+See [docs/PORTING.md](docs/PORTING.md), and [docs/METHOD_NOTES.md](docs/METHOD_NOTES.md) for what did and did not work.
 
 ## 📁 Repository layout
 
@@ -317,7 +235,7 @@ it. [docs/PORTING.md](docs/PORTING.md) covers:
 ode_policy/
 ├── policies/ode/ode_image_policy.py   # the ODE policy: vector fields, integration, loss, diversity head
 ├── policies/{fm,a2a,dp,mars,act}/     # baselines
-├── configs/policy_config/             # one yaml per policy (ode.yaml = the paper's configuration)
+├── configs/policy_config/             # one yaml per policy
 ├── libero/                            # LIBERO: data conversion, env wrapper, training runner, evaluators
 │   ├── build_ode_zarr.py              #   demonstrations -> virtual-target poses for the ODE policy
 │   ├── pose.py                        #   pose representation and the pose -> OSC command tracker
