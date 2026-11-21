@@ -77,7 +77,7 @@ Against 14 baselines, in simulation and on four real robots:
 - ⚡ **Execution.** **5.7 ms** per chunk of 8 actions, **10.8×** faster than FM-DiT, with the lowest end-effector jerk.
 - 🌐 **Generalization and multi-modality.** After one epoch, **5.4×** the zero-shot success of flow matching on
   LIBERO-plus and **3.9×** its mode balance on a four-route navigation task.
-- 🦾 **Real robots.** Highest success rate on all **15** tasks across single-arm, dual-arm, dexterous-hand and
+- 🦾 **Real robots.** Highest success rate on all **18** tasks across single-arm, dual-arm, dexterous-hand and
   humanoid robots, and mostly smoother than the human demonstrations.
 - 🏃 **Reinforcement learning.** As the actor of SuperMimic, a **30%** higher evaluation return after 0.4 hours and
   still ahead after 3 hours (0.885 against 0.845).
