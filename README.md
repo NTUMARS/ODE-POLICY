@@ -21,26 +21,22 @@
   <img src="docs/assets/teaser.jpg" alt="ODE policy across embodiments and models" width="100%">
 </p>
 
+> [!NOTE]
+> **ODE policy is still young.** It is a first step, and many parts (the field architecture, regularization on small
+> datasets, the gripper and other discrete actions, solvers) are far from settled. Extensions, fixes and new
+> benchmarks are very welcome, through issues or pull requests.
+
 ## 📰 News
 
-- **[2026-11-21]** 🦾 **ManiSkill3 and robomimic are on `main`.** One ODE model trained on 8 ManiSkill3 tasks and
-  one on 4 robomimic tasks, each against FM-DiT on the same data. The ODE learns faster early on and is level by
-  epoch 50, with 5–10× faster inference and about half the jerk. robomimic has only 200 demonstrations per task
-  and the ODE overfits them; dropout on the vector field fixes this (Square 73% → 93%).
-  See [ManiSkill3 and robomimic](#-maniskill3-and-robomimic).
-- **[2026-11-13]** 🧩 **New default configuration, sturdier across datasets.** Proprioception now enters through the
-  observation condition, and a discrete gripper is integrated as a *ramped state of the ODE* instead of a
-  classification head (the command sent stays discrete). On LIBERO it matches the paper's configuration and
-  generalizes better on LIBERO-plus (51.3% vs 34.3% zero-shot); on data with pauses and discrete gripper signals
-  it no longer stalls.
-  See [Default configuration](#-default-configuration-2026-11). The paper's configuration is one set of flags away
-  ([docs/REPRODUCE.md](docs/REPRODUCE.md)).
-- **[2026-11-09]** ⚡ **The ODE policy now defaults to the *Euler* solver**, which learns about as well as RK4 and
-  generates a chunk of 8 actions in 5.7 ms on LIBERO. Add `policy_config.solver=rk4` to reproduce the paper's runs exactly.
-- **[2026-11-03]** 📄 **The paper is on arXiv:** [2611.01729](https://arxiv.org/abs/2611.01729).
-- **[2026-10-28]** 🌿 **Code released:** ODE policy, ten imitation-learning baselines, LIBERO and LIBERO-plus,
-  the 2D multimodal navigation task, and branches for the Galaxea R1 Lite, the π0.5 VLA and SuperMimic RL.
-  See [Code organization](#-code-organization).
+- **[2026-11-21]** 🦾 ManiSkill3 (8 tasks) and robomimic (4 tasks) added: faster early learning than FM-DiT, level by
+  epoch 50, 5–10× faster inference. [Details](#-maniskill3-and-robomimic)
+- **[2026-11-13]** 🧩 New default configuration: gripper as a ramped ODE state, better LIBERO-plus zero-shot
+  (51.3% vs 34.3%). [Details](#-default-configuration-2026-11)
+- **[2026-11-09]** ⚡ *Euler* is now the default solver (5.7 ms per chunk on LIBERO). `policy_config.solver=rk4`
+  restores the paper's runs.
+- **[2026-11-03]** 📄 Paper on arXiv: [2611.01729](https://arxiv.org/abs/2611.01729).
+- **[2026-10-28]** 🌿 Code released: ODE policy, ten baselines, LIBERO, LIBERO-plus, 2D navigation, and branches for
+  real robots, VLA and RL. [Details](#-code-organization)
 
 ## 🌿 Code organization
 
