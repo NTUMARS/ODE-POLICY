@@ -275,11 +275,11 @@ One model per method is trained on all tasks of a benchmark and tested on each, 
 | Tasks | 8: PushCube, PickCube, StackCube, PullCube, LiftPegUpright, PlaceSphere, PullCubeTool, StackPyramid | 4: Tool Hang, Square, Can, Lift |
 | Demonstrations | 200 per task, motion planning | 200 per task, proficient human |
 | Input, action | 128 px base camera, joint state; joint targets | agent-view and wrist cameras at 240 px, CLIP task embedding; end-effector pose |
-| ODE setting | gripper state sent as the command (`grip_cmd=raw`) | dropout 0.3 on the field's pose outputs |
-| Mean success %, epochs 1 / 5 / 10 / 20 / 50: ODE | **34.1 / 52.8 / 64.8 / 69.6 / 72.5** | **11.0 / 43.5 / 65.0 / 85.0 / 83.5** |
+| ODE setting | gripper state sent as the command (`grip_cmd=raw`) | same, plus dropout 0.3 on the field's pose outputs |
+| Mean success %, epochs 1 / 5 / 10 / 20 / 50: ODE | **34.1 / 52.8 / 64.8 / 69.6 / 72.5** | **8.2 / 43.8 / 65.5 / 86.8 / 85.8** |
 | FM-DiT | 9.4 / 28.4 / 40.5 / 55.0 / 71.1 | 9.3 / 35.0 / 50.2 / 64.2 / 83.3 |
 | Inference per chunk, ODE vs FM-DiT | 5.7 vs 55.0 ms | 12.3 vs 68.1 ms |
-| End-effector jerk, ODE vs FM-DiT | 4.4 vs 8.2 m/s³ | 4.7 vs 10.6 m/s³ |
+| End-effector jerk, ODE vs FM-DiT | 4.4 vs 8.2 m/s³ | 4.3 vs 10.6 m/s³ |
 
 One seed, 100 test episodes per task and checkpoint. Inference time and jerk are measured at epoch 50 (jerk over
 successful episodes).

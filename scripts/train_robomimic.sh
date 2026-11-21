@@ -7,7 +7,8 @@
 #
 # Agent-view and wrist cameras at 240 x 240 (random crop 216), CLIP task embedding, 2 observation frames,
 # 8 actions per chunk, batch 64, cosine schedule over 100 epochs, checkpoints at 1 / 5 / 10 / 20 / 50 / 100.
-# The ODE adds dropout 0.3 on its field's pose outputs (200 demonstrations per task overfit without it).
+# The ODE sends the gripper state as the command (grip_cmd=raw) and adds dropout 0.3 on its field's pose outputs
+# (200 demonstrations per task overfit without it).
 # Checkpoints go to il_outputs/<policy>/rm4/checkpoints/<epoch>.ckpt.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +20,7 @@ POLICY="${1:?usage: train_robomimic.sh <policy> [hydra overrides...]}"
 shift
 case "${POLICY}" in
     ode|ode_dit) ZARR="${ZARR:-./data_policy/rm4_ph_ode_vt_gr5.zarr}"
-                 X=(policy_config.field_dropout=0.3 policy_config.field_dropout_pose=true) ;;
+                 X=(policy_config.grip_cmd=raw policy_config.field_dropout=0.3 policy_config.field_dropout_pose=true) ;;
     *)           ZARR="${ZARR:-./data_policy/rm4_ph_ode_delta.zarr}"; X=() ;;
 esac
 [[ -d "${ZARR}" ]] || { echo "missing ${ZARR}: run scripts/prepare_robomimic_data.sh first" >&2; exit 1; }
