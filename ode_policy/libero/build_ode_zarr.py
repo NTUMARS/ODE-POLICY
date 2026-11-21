@@ -72,13 +72,20 @@ def main():
                     help="ramp each gripper open/close switch over this many steps in the ODE copy, "
                          "so the gripper is a continuous state for grip_ode (the default policy); "
                          "1 = the raw +-1 command (the paper's classification-head setting)")
+    ap.add_argument("--src", default=None,
+                    help="any zarr in the LIBERO layout instead of <data_root>/<suite>_50demo.zarr "
+                         "(e.g. robomimic); the output is <src>_ode_vt[_gr5].zarr")
     args = ap.parse_args()
 
-    src = os.path.join(args.data_root, f"{args.suite}_50demo.zarr")
     suffix = {"measured": "_ode", "virtual": "_ode_vt", "delta": "_ode_delta"}[args.target]
     if args.grip_ramp > 1:
         suffix += f"_gr{args.grip_ramp}"      # the default policy's data; --grip_ramp 1 = the paper's
-    dst = os.path.join(args.data_root, f"{args.suite}_50demo{suffix}.zarr")
+    if args.src:
+        src = args.src.rstrip("/")
+        dst = src[:-len(".zarr")] + f"{suffix}.zarr"
+    else:
+        src = os.path.join(args.data_root, f"{args.suite}_50demo.zarr")
+        dst = os.path.join(args.data_root, f"{args.suite}_50demo{suffix}.zarr")
     if os.path.exists(dst):
         if not args.force:
             print(f"{dst} exists; pass --force to rebuild")

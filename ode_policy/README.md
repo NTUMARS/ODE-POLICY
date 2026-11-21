@@ -14,8 +14,9 @@ runners/base_runner.py    # checkpoint save / load, output directories
 utils/                    # encoders, flow matchers, normalizers, samplers
 libero/                   # everything LIBERO-specific
 nav2d/                    # the 2D multimodal navigation task
+maniskill/ robomimic/     # ManiSkill3 and robomimic (data, evaluators; training uses the LIBERO runner)
 ```
 
-Everything outside `libero/` and `nav2d/` is benchmark-agnostic: data arrives as a zarr and
+Everything outside the benchmark folders is benchmark-agnostic: data arrives as a zarr and
 observations as a plain dict, so the same policies run on any dataset converted to that layout
 (see `libero/hdf5_to_zarr.py` for the layout).

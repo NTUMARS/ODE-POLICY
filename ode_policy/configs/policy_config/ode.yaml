@@ -64,7 +64,7 @@ joint_space: false     # true: a is a joint-position vector (real robot)
 n_grippers: 1
 state_pose_index: null
 # gripper as one more ODE state (ramped in the data, see build_ode_zarr.py --grip_ramp) instead
-# of a classification head; the command sent stays discrete. Paper: grip_ode=false
+# of a classification head; the command sent stays discrete (grip_cmd). Paper: grip_ode=false
 grip_ode: true
 grip_carry: state       # grip_ode: next chunk continues from the integrated state (sign = snap to the command)
 grip_open: -1.0         # grip_ode: the command value meaning open (LIBERO -1); state at an episode start
@@ -72,3 +72,8 @@ grip_thresh: null       # grip_ode: closed once the state passes this from the o
 grip_vel: 1.0           # grip_ode: velocity scale of the gripper state (normalised units per step; a flip is 2)
 grip_ode_weight: 1.0    # grip_ode: loss weight of the gripper state
 grip_clamp: true        # grip_ode: clamp the gripper state to +-|grip_open| after every integration step (no loss spikes)
+grip_cmd: sign          # grip_ode: open/closed by grip_thresh (sign), or the gripper state itself (raw, ManiSkill)
+# dropout on the MLP field's hidden units (training only, one mask per sample per chunk); helps
+# small datasets (robomimic, 200 demos per task: field_dropout=0.3 field_dropout_pose=true)
+field_dropout: 0.0
+field_dropout_pose: false  # dropout on the pose outputs only (the gripper from an undropped pass)

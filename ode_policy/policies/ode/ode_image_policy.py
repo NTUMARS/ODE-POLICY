@@ -95,8 +95,12 @@ class VectorField(nn.Module):
     the field depends only on where the reference is and what the policy currently sees."""
 
     def __init__(self, cond_dim, state_dim, hidden_dim, num_layers, out_dim=POSE_DIM,
-                 pose_dim=POSE_DIM):
+                 pose_dim=POSE_DIM, dropout=0.0, drop_first=None):
         super().__init__()
+        # training only: hidden units dropped with probability `dropout`, one mask per sample kept
+        # for every field call until reset_dropout(), so a whole integrated chunk sees one thinned
+        # field. drop_first=k: only the first k outputs (the pose) come from the dropped pass.
+        self.dropout, self.drop_first, self._masks = float(dropout), drop_first, None
         self.inp = nn.Linear(pose_dim + state_dim, hidden_dim)
         self.layers = nn.ModuleList([_FiLMLayer(hidden_dim, cond_dim) for _ in range(num_layers)])
         self.out = nn.Linear(hidden_dim, out_dim)
@@ -108,11 +112,27 @@ class VectorField(nn.Module):
         """FiLM scale/shift depend on c only; compute them once per integration."""
         return [layer.film(c).chunk(2, dim=-1) for layer in self.layers]
 
+    def reset_dropout(self):
+        self._masks = None
+
     def forward(self, a, s, c, film=None, return_h=False):
+        drop = self.training and self.dropout > 0
+        v, h = self._forward(a, s, c, film, drop)
+        if drop and self.drop_first is not None:
+            k = self.drop_first
+            v = torch.cat([v[..., :k], self._forward(a, s, c, film, False)[0][..., k:]], dim=-1)
+        return (v, h) if return_h else v
+
+    def _forward(self, a, s, c, film, drop):
         h = self.inp(torch.cat([a, s], dim=-1))
+        if drop and (self._masks is None or self._masks[0].shape != h.shape):
+            keep = 1.0 - self.dropout
+            self._masks = [torch.bernoulli(torch.full_like(h, keep)) / keep for _ in self.layers]
         for i, layer in enumerate(self.layers):
             h = layer(h, c, None if film is None else film[i])
-        return (self.out(h), h) if return_h else self.out(h)
+            if drop:
+                h = h * self._masks[i]
+        return self.out(h), h
 
 
 class DiTVectorField(nn.Module):
@@ -233,6 +253,14 @@ class ODEImagePolicy(BaseImagePolicy):
         # integration step: unbounded, the stiff ramp velocity overshoots under explicit
         # integration and can grow without limit within one chunk (loss spikes)
         grip_clamp=True,
+        # command sent: "sign" = open / closed by grip_thresh; "raw" = the gripper state itself
+        # (clamped to +-|grip_open|), so a gripper demonstrated half closed is reproduced (ManiSkill)
+        grip_cmd="sign",
+        # dropout on the hidden units of the MLP field (training only, one mask per sample for the
+        # whole chunk); field_dropout_pose: on the pose outputs only, the gripper from an undropped
+        # pass. Against overfitting small datasets (robomimic: 200 demonstrations per task)
+        field_dropout=0.0,
+        field_dropout_pose=False,
         **kwargs,
     ):
         super().__init__()
@@ -244,6 +272,8 @@ class ODEImagePolicy(BaseImagePolicy):
         self.grip_carry, self.grip_open = grip_carry, float(grip_open)
         self.grip_thresh = 0.8 * self.grip_open if grip_thresh is None else float(grip_thresh)
         self.grip_clamp = bool(grip_clamp)
+        assert grip_cmd in ("raw", "sign"), grip_cmd
+        self.grip_cmd = grip_cmd
         assert not grip_ode or (self.n_grippers == 1 and side_mode == "velocity"), \
             "grip_ode: one gripper, velocity-mode side head only"
         fp = pose_dim + int(grip_ode)   # field state: pose (+ gripper)
@@ -272,7 +302,8 @@ class ODEImagePolicy(BaseImagePolicy):
                                         fp, fp, num_heads=dit_heads, n_tokens=dit_tokens)
         else:
             assert field_arch == "mlp", field_arch
-            self.field = VectorField(cond_dim, field_state_dim, hidden_dim, num_layers, fp, fp)
+            self.field = VectorField(cond_dim, field_state_dim, hidden_dim, num_layers, fp, fp,
+                                     dropout=field_dropout, drop_first=pose_dim if field_dropout_pose else None)
         assert side_mode in ("position", "velocity"), side_mode
         self.side_k, self.side_mode = side_head, side_mode
         if side_head:
@@ -527,6 +558,9 @@ class ODEImagePolicy(BaseImagePolicy):
                 if emit_substeps:
                     glogit = glogit.repeat_interleave(substeps or self.substeps, dim=1)
         grip = torch.where(glogit >= 0, 1.0, -1.0)
+        if self.grip_ode and self.grip_cmd == "raw":
+            g = abs(self.grip_open)
+            grip = extra["grip_state"].clamp(-g, g)[..., None]
         action = torch.cat([traj, grip], dim=-1)
         return {"action": action, "action_pred": action, **extra}
 
@@ -535,6 +569,8 @@ class ODEImagePolicy(BaseImagePolicy):
         self.normalizer.load_state_dict(normalizer.state_dict())
 
     def compute_loss(self, batch):
+        if hasattr(self.field, "reset_dropout"):
+            self.field.reset_dropout()       # a fresh dropout mask per batch
         nobs = self.normalizer.normalize(batch["obs"])
         nact = self.normalizer["action"].normalize(batch["action"])
         To, Ta = self.n_obs_steps, self.n_action_steps

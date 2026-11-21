@@ -5,6 +5,7 @@ Training only: evaluation is a separate script (``libero_eval_runner.py`` /
 """
 from __future__ import annotations
 
+import collections
 import copy
 import os
 import random
@@ -182,6 +183,8 @@ class LiberoTrainRunner(BaseRunner):
             cfg.train_config.training_params.sample_every = 1
 
         _csv_step_rows = []
+        spike_k = cfg.train_config.training_params.get("skip_loss_spike", 0) or 0
+        recent = collections.deque(maxlen=200)
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         with JsonLogger(log_path) as json_logger:
             for _ in range(cfg.train_config.training_params.num_epochs):
@@ -204,16 +207,27 @@ class LiberoTrainRunner(BaseRunner):
                             train_sampling_batch = batch
 
                         raw_loss = self.model.compute_loss(batch)
-                        loss = raw_loss / cfg.train_config.training_params.gradient_accumulate_every
-                        loss.backward()
-
-                        if self.global_step % cfg.train_config.training_params.gradient_accumulate_every == 0:
-                            self.optimizer.step()
+                        # skip_loss_spike k > 0: a batch whose loss is non-finite or above k x the median
+                        # of the last 200 gets no update (one 5.6e6 batch once wrecked a ManiSkill run)
+                        rl = float(raw_loss.detach())
+                        spike = spike_k > 0 and (not np.isfinite(rl) or (
+                            len(recent) >= 50 and rl > spike_k * float(np.median(recent))))
+                        if spike:
+                            log.warning(f"skipped batch at step {self.global_step}: loss {rl:.4g}")
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
+                        else:
+                            recent.append(rl)
+                            loss = raw_loss / cfg.train_config.training_params.gradient_accumulate_every
+                            loss.backward()
 
-                        if cfg.train_config.training_params.use_ema:
-                            ema.step(self.model)
+                            if self.global_step % cfg.train_config.training_params.gradient_accumulate_every == 0:
+                                self.optimizer.step()
+                                self.optimizer.zero_grad()
+                                lr_scheduler.step()
+
+                            if cfg.train_config.training_params.use_ema:
+                                ema.step(self.model)
 
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)

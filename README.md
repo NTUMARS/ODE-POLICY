@@ -23,6 +23,11 @@
 
 ## 📰 News
 
+- **[2026-11-21]** 🦾 **ManiSkill3 and robomimic are on `main`.** One ODE model trained on 8 ManiSkill3 tasks and
+  one on 4 robomimic tasks, each against FM-DiT on the same data. The ODE learns faster early on and is level by
+  epoch 50, with 5–10× faster inference and about half the jerk. robomimic has only 200 demonstrations per task
+  and the ODE overfits them; dropout on the vector field fixes this (Square 73% → 93%).
+  See [ManiSkill3 and robomimic](#-maniskill3-and-robomimic).
 - **[2026-11-13]** 🧩 **New default configuration, sturdier across datasets.** Proprioception now enters through the
   observation condition, and a discrete gripper is integrated as a *ramped state of the ODE* instead of a
   classification head (the command sent stays discrete). On LIBERO it matches the paper's configuration and
@@ -45,7 +50,7 @@
 
 | Code / branch | Setting | Contents | Status |
 | --- | --- | --- | --- |
-| [`main`](https://github.com/NTUMARS/ODE-POLICY/tree/main) | 🖥️ Sim | ODE policy and imitation-learning baselines, LIBERO and LIBERO-plus training and evaluation, and 2D navigation. | ✅ available |
+| [`main`](https://github.com/NTUMARS/ODE-POLICY/tree/main) | 🖥️ Sim | ODE policy and imitation-learning baselines, LIBERO, LIBERO-plus, ManiSkill3 and robomimic training and evaluation, and 2D navigation. | ✅ available |
 | [`wam-imagewam`](https://github.com/NTUMARS/ODE-POLICY/tree/wam-imagewam) | 🧠 WAM (Sim) | ImageWAM ODE full training and evaluation on standard LIBERO and LIBERO Plus. Guide: [WAM](https://github.com/NTUMARS/ODE-POLICY/blob/wam-imagewam/docs/wam_libero/README.md). | ✅ available |
 | [`real-g1`](https://github.com/NTUMARS/ODE-POLICY/tree/real-g1) | 🦾 Real | GR00T ODE training and Unitree G1 deployment, with SONIC whole-body control and direct dexterous-hand control. Guide: [GR00T G1](https://github.com/NTUMARS/ODE-POLICY/blob/real-g1/docs/deploy_groot/README.md). | ✅ available |
 | [`real-r1lite`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite) | 🦾 Real | Galaxea R1 Lite, one or two arms in joint space: data conversion, multi-GPU training and a deployment server. Guide: [`ode_policy/real/`](https://github.com/NTUMARS/ODE-POLICY/tree/real-r1lite/ode_policy/real). | ✅ available |
@@ -87,6 +92,7 @@ Against 14 baselines, in simulation and on four real robots:
 | --- | --- |
 | Check the installation in minutes | [Quick start: 2D navigation](#-quick-start-2d-navigation-minutes) |
 | Train and evaluate on LIBERO | [LIBERO](#-libero) |
+| Train and evaluate on ManiSkill3 or robomimic | [ManiSkill3 and robomimic](#-maniskill3-and-robomimic) |
 | Train ImageWAM ODE and evaluate on LIBERO / LIBERO Plus | [WAM guide](https://github.com/NTUMARS/ODE-POLICY/blob/wam-imagewam/docs/wam_libero/README.md) |
 | Train GR00T ODE and deploy it on a Unitree G1 | [GR00T G1 guide](https://github.com/NTUMARS/ODE-POLICY/blob/real-g1/docs/deploy_groot/README.md) |
 | Reproduce the paper's simulation experiments | [docs/REPRODUCE.md](docs/REPRODUCE.md) |
@@ -180,8 +186,8 @@ Hang-like tasks) make it stand still. The integrated gripper state carries the t
 
 On ManiSkill3 (joint control, 200 demonstrations, 100 test episodes per point) the new default against FM-DiT on the
 same data, epochs 10 / 50 / 100: PickCube 96 / 100 / 100 vs 23 / 88 / 90, StackCube 9 / 29 / 26 vs 0 / 6 / 9,
-PushCube 99 / 97 / 97 vs 100 / 95 / 96, with 3–15× lower end-effector jerk and ~10× faster inference. The ManiSkill3
-pipeline will be released on its own branch.
+PushCube 99 / 97 / 97 vs 100 / 95 / 96, with 3–15× lower end-effector jerk and ~10× faster inference. The
+ManiSkill3 pipeline is in [ManiSkill3 and robomimic](#-maniskill3-and-robomimic).
 
 ¹ ManiSkill3 runs: no diversity head, start perturbation 0.03 rad per joint, Euler; the paper-configuration number
 is from an earlier run with 30 test episodes.
@@ -260,6 +266,41 @@ end-effector jerk, command smoothness inside and across chunks, and inference ti
 > To reproduce the paper's experiments (data efficiency, network size, chunk length, integrator, LIBERO-plus zero-shot
 > generalization, inference speed), see [docs/REPRODUCE.md](docs/REPRODUCE.md).
 
+## 🦾 ManiSkill3 and robomimic
+
+One model per method is trained on all tasks of a benchmark and tested on each, as on LIBERO.
+
+| | ManiSkill3 | robomimic |
+| --- | --- | --- |
+| Tasks | 8: PushCube, PickCube, StackCube, PullCube, LiftPegUpright, PlaceSphere, PullCubeTool, StackPyramid | 4: Tool Hang, Square, Can, Lift |
+| Demonstrations | 200 per task, motion planning | 200 per task, proficient human |
+| Input, action | 128 px base camera, joint state; joint targets | agent-view and wrist cameras at 240 px, CLIP task embedding; end-effector pose |
+| ODE setting | gripper state sent as the command (`grip_cmd=raw`) | dropout 0.3 on the field's pose outputs |
+| Mean success %, epochs 1 / 5 / 10 / 20 / 50: ODE | **34.1 / 52.8 / 64.8 / 69.6 / 72.5** | **11.0 / 43.5 / 65.0 / 85.0 / 83.5** |
+| FM-DiT | 9.4 / 28.4 / 40.5 / 55.0 / 71.1 | 9.3 / 35.0 / 50.2 / 64.2 / 83.3 |
+| Inference per chunk, ODE vs FM-DiT | 5.7 vs 55.0 ms | 12.3 vs 68.1 ms |
+| End-effector jerk, ODE vs FM-DiT | 4.4 vs 8.2 m/s³ | 4.7 vs 10.6 m/s³ |
+
+One seed, 100 test episodes per task and checkpoint. Inference time and jerk are measured at epoch 50 (jerk over
+successful episodes).
+
+```bash
+# ManiSkill3 (environment: ode_policy/maniskill/README.md)
+bash scripts/prepare_maniskill_data.sh
+bash scripts/train_maniskill.sh ode            # or fm_dit
+bash scripts/eval_maniskill.sh il_outputs/ode/ms_8task/checkpoints/50.ckpt
+# robomimic
+bash scripts/prepare_robomimic_data.sh
+bash scripts/train_robomimic.sh ode
+bash scripts/eval_robomimic.sh il_outputs/ode/rm4/checkpoints/50.ckpt
+```
+
+**Small datasets overfit.** robomimic has only 200 demonstrations per task. On it the ODE fits the training paths
+almost exactly, and its success drops after about epoch 20. Dropout on the vector field fixes this: one mask per
+chunk, off at test time (`policy_config.field_dropout=0.3 policy_config.field_dropout_pose=true`). For single-task
+models at epoch 100 it raises Square from 73% to 93% and Transport from 38% to 80%. `train_robomimic.sh` turns it
+on. LIBERO (2000 demonstrations) and ManiSkill3 (1600) do not need it.
+
 ## 🦾 Bring ODE policy to your robot
 
 The one step that matters is choosing the action state `a` so that the controller reproduces the demonstration from
@@ -287,6 +328,8 @@ ode_policy/
 │   ├── eval_ode_policy.py             #   ODE evaluator
 │   ├── libero_eval_runner.py          #   evaluator for every other policy
 │   └── libero_plus_eval_runner.py     #   LIBERO-plus zero-shot evaluation
+├── maniskill/                         # ManiSkill3: demo generation, rendering, multi-task set, evaluator
+├── robomimic/                         # robomimic: rendering, multi-task set, evaluator
 ├── nav2d/                             # 2D multimodal navigation task
 ├── datasets/ utils/ runners/          # zarr datasets, encoders, normalizers, checkpointing
 └── train.py                           # Hydra training entry point

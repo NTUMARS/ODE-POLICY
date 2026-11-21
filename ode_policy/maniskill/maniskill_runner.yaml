@@ -1,0 +1,78 @@
+# Training config for ManiSkill3 (ode_policy/maniskill). Every method gets the same data, encoder and
+# schedule; only the action head differs:
+#   128 px base camera + agent_pos [arm qpos (7), gripper opening (1), goal (3), task one-hot (K)];
+#   action = pd_joint_pos target [7 arm joints, gripper];
+#   2 observation frames, horizon 16, 8 actions executed; batch 64, AdamW 1e-4, cosine schedule.
+# Prefer scripts/train_maniskill.sh, which sets the per-method data and overrides.
+
+defaults:
+  - /dataset_config: robot_image_dataset
+  - /policy_config: ${oc.env:policy_name,fm_dit}
+  - /train_config: default_train
+  - _self_
+
+policy_name: ${oc.env:policy_name,fm_dit}
+task_name: ms_8task
+name: ${task_name}
+_target_: ode_policy.libero.libero_train_runner.LiberoTrainRunner
+
+hydra:
+  searchpath:
+    - pkg://ode_policy.configs
+  job:
+    override_dirname: ${name}
+  run:
+    dir: ./il_outputs/${policy_name}/${task_name}
+
+dataset_config:
+  zarr_path: ./data_policy/ms_8task.zarr
+  max_train_episodes: null
+  batch_size: 64
+
+train_config:
+  dataloader:
+    batch_size: 64
+  val_dataloader:
+    batch_size: 64
+  training_params:
+    num_epochs: 50
+    # skip a batch whose loss is non-finite or > 20x the median of the last 200 (never fires on normal batches)
+    skip_loss_spike: 20
+
+image_shape: &image_shape [3, 128, 128]
+shape_meta: &shape_meta
+  obs:
+    head_cam:
+      shape: *image_shape
+      type: rgb
+    agent_pos:
+      shape: [19]     # 8 + goal 3 + 8 tasks; train_maniskill.sh sets it from the zarr
+      type: low_dim
+  action:
+    shape: [8]
+
+exp_name: "maniskill"
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+past_action_visible: False
+keypoint_visible_rate: 1.0
+obs_as_global_cond: True
+
+train_enable: True
+eval_enable: False
+eval_path: null
+
+logging:
+  project: ODE_Policy_maniskill
+  resume: False
+  mode: disabled   # online: log to Weights & Biases (pip install wandb, wandb login)
+  name: ${task_name}
+  tags: [maniskill, "${policy_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  save_root_dir: ./il_outputs/${policy_name}/${task_name}
